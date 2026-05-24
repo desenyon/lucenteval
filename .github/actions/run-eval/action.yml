@@ -1,0 +1,150 @@
+name: "Lucent Eval"
+description: "Run an adversarial eval suite against your AI agent and block CI if the score falls below threshold"
+author: "Lucent Eval"
+
+inputs:
+  api_key:
+    description: "Your Lucent Eval API key"
+    required: true
+  endpoint_url:
+    description: "Your agent's HTTPS endpoint (OpenAI-compatible)"
+    required: true
+  auth_header:
+    description: "Authorization header value (e.g. Bearer sk-...)"
+    required: false
+    default: ""
+  system_prompt:
+    description: "Optional system prompt override"
+    required: false
+    default: ""
+  min_composite_score:
+    description: "Minimum composite score (0.0-1.0) to pass CI"
+    required: false
+    default: "0.7"
+  corpus_version:
+    description: "Corpus version to run against"
+    required: false
+    default: "v1"
+  api_url:
+    description: "Lucent Eval API base URL"
+    required: false
+    default: "https://api.lucenteval.dev"
+  timeout_minutes:
+    description: "Max minutes to wait for eval to complete"
+    required: false
+    default: "30"
+
+outputs:
+  run_id:
+    description: "The Lucent Eval run ID"
+  composite_score:
+    description: "The composite score (0.0-1.0)"
+  score_adversarial:
+    description: "Adversarial score"
+  score_hallucination:
+    description: "Hallucination score"
+  score_latency:
+    description: "Latency score"
+  run_url:
+    description: "URL to view full results"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run Lucent Eval
+      id: run_eval
+      shell: bash
+      env:
+        LUCENT_API_KEY: ${{ inputs.api_key }}
+        ENDPOINT_URL: ${{ inputs.endpoint_url }}
+        AUTH_HEADER: ${{ inputs.auth_header }}
+        SYSTEM_PROMPT: ${{ inputs.system_prompt }}
+        MIN_SCORE: ${{ inputs.min_composite_score }}
+        CORPUS_VERSION: ${{ inputs.corpus_version }}
+        API_URL: ${{ inputs.api_url }}
+        TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+      run: |
+        set -euo pipefail
+
+        echo "🚀 Submitting eval run to Lucent Eval..."
+
+        HEADERS="{}"
+        if [ -n "$AUTH_HEADER" ]; then
+          HEADERS="{\"Authorization\": \"$AUTH_HEADER\"}"
+        fi
+
+        CREATE_BODY=$(jq -n \
+          --arg url "$ENDPOINT_URL" \
+          --argjson headers "$HEADERS" \
+          --arg sys "$SYSTEM_PROMPT" \
+          --arg cv "$CORPUS_VERSION" \
+          '{endpoint_url: $url, headers: $headers, system_prompt: (if $sys == "" then null else $sys end), corpus_version: $cv}')
+
+        RUN_RESP=$(curl -sf \
+          -X POST "$API_URL/v1/runs" \
+          -H "Authorization: Bearer $LUCENT_API_KEY" \
+          -H "Content-Type: application/json" \
+          -d "$CREATE_BODY")
+
+        RUN_ID=$(echo "$RUN_RESP" | jq -r '.id')
+        echo "📋 Run ID: $RUN_ID"
+        echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+        # Poll until complete
+        TIMEOUT=$((TIMEOUT_MINUTES * 60))
+        ELAPSED=0
+        POLL_INTERVAL=15
+
+        while [ $ELAPSED -lt $TIMEOUT ]; do
+          sleep $POLL_INTERVAL
+          ELAPSED=$((ELAPSED + POLL_INTERVAL))
+
+          RUN_DATA=$(curl -sf \
+            "$API_URL/v1/runs/$RUN_ID" \
+            -H "Authorization: Bearer $LUCENT_API_KEY")
+
+          STATUS=$(echo "$RUN_DATA" | jq -r '.status')
+          COMPLETED=$(echo "$RUN_DATA" | jq -r '.completed_count')
+          TOTAL=$(echo "$RUN_DATA" | jq -r '.prompt_count')
+
+          echo "⏳ Status: $STATUS ($COMPLETED/$TOTAL prompts)"
+
+          if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
+            break
+          fi
+        done
+
+        if [ "$STATUS" != "completed" ]; then
+          echo "❌ Eval did not complete in time (status: $STATUS)"
+          exit 1
+        fi
+
+        COMPOSITE=$(echo "$RUN_DATA" | jq -r '.composite_score // "null"')
+        ADV=$(echo "$RUN_DATA" | jq -r '.score_adversarial // "null"')
+        HALL=$(echo "$RUN_DATA" | jq -r '.score_hallucination // "null"')
+        LAT=$(echo "$RUN_DATA" | jq -r '.score_latency // "null"')
+        RUN_URL="$API_URL/runs/$RUN_ID"
+
+        echo "composite_score=$COMPOSITE" >> "$GITHUB_OUTPUT"
+        echo "score_adversarial=$ADV" >> "$GITHUB_OUTPUT"
+        echo "score_hallucination=$HALL" >> "$GITHUB_OUTPUT"
+        echo "score_latency=$LAT" >> "$GITHUB_OUTPUT"
+        echo "run_url=$RUN_URL" >> "$GITHUB_OUTPUT"
+
+        echo ""
+        echo "📊 Lucent Eval Results"
+        echo "────────────────────────────────────"
+        echo "  Composite:    $COMPOSITE"
+        echo "  Adversarial:  $ADV"
+        echo "  Hallucination:$HALL"
+        echo "  Latency:      $LAT"
+        echo "  Run URL:      $RUN_URL"
+        echo ""
+
+        # Fail CI if below threshold
+        PASS=$(echo "$COMPOSITE $MIN_SCORE" | awk '{print ($1 >= $2) ? "true" : "false"}')
+        if [ "$PASS" = "false" ]; then
+          echo "❌ Composite score $COMPOSITE is below minimum threshold $MIN_SCORE"
+          exit 1
+        fi
+        echo "✅ Score $COMPOSITE meets minimum threshold $MIN_SCORE"

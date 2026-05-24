@@ -1,0 +1,37 @@
+name: Lucent Eval Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  eval:
+    name: AI Agent Eval
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Lucent Eval
+        id: eval
+        uses: ./.github/actions/run-eval
+        with:
+          api_key: ${{ secrets.LUCENT_API_KEY }}
+          endpoint_url: ${{ secrets.AGENT_ENDPOINT_URL }}
+          auth_header: ${{ secrets.AGENT_AUTH_HEADER }}
+          min_composite_score: "0.75"
+          corpus_version: "v1"
+
+      - name: Post score summary
+        if: always()
+        run: |
+          echo "## Lucent Eval Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Dimension | Score |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Composite | ${{ steps.eval.outputs.composite_score }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Adversarial | ${{ steps.eval.outputs.score_adversarial }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Hallucination | ${{ steps.eval.outputs.score_hallucination }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Latency | ${{ steps.eval.outputs.score_latency }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "[View full results](${{ steps.eval.outputs.run_url }})" >> $GITHUB_STEP_SUMMARY

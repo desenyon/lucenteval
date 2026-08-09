@@ -310,3 +310,80 @@ Scores are normalized 0.0–1.0 per dimension.
 ## License
 
 MIT
+
+<!-- architecture-atlas-v5:start -->
+## Architecture Atlas v5
+
+These editable Mermaid diagrams mirror the [Notion architecture dossier](https://app.notion.com/p/3b467342e8c181989be5e9ab1c38188f?pvs=204).
+
+### 1. Distributed anatomy
+
+```mermaid
+flowchart LR
+  WEB["Next.js public UI + run explorer"] --> API["FastAPI control plane"]
+  API --> MANIFEST["Immutable run-manifest service<br>agent endpoint, benchmark version, scorer versions, frozen weights"]
+  MANIFEST --> PG[("Postgres metadata")]
+  API --> QUEUE[("Redis queue + worker leases")]
+  QUEUE --> WORK["Celery workers"]
+  WORK --> SHARD["Prompt sharder + category scheduler"]
+  SHARD --> INJECT["Failure and tool-environment injector"]
+  INJECT --> AGENT["External OpenAI-compatible agent endpoint"]
+  AGENT --> REC["Transcript, tool call, latency and cost recorder"]
+  REC --> SCORE["Resistance, misuse, groundedness, hallucination and recovery scorers"]
+  SCORE --> AGG["Normalized dimension aggregation + confidence"]
+  REC --> S3[("S3 / MinIO raw artifacts")]
+  REC --> CH[("ClickHouse event analytics")]
+  AGG --> SIGN["Signed run result"] --> BOARD["Historical leaderboard"]
+```
+
+### 2. Job wiring
+
+```mermaid
+flowchart TB
+  CREATE["Create run"] --> FREEZE["Validate endpoint and freeze immutable manifest"] --> SPLIT["Shard 500+ prompts by category"] --> LEASE["Issue idempotent worker leases"]
+  LEASE --> CALL["Invoke agent under timeout, tools and injected failures"] --> RECORD["Store complete raw transcript before scoring"]
+  RECORD --> MULTI["Independent dimension scorers"] --> NORM["Normalize latency, cost and quality dimensions"] --> AGG["Aggregate with versioned public weights"]
+  CALL -. retry .-> DEDUPE{"Existing artifact for shard/run?"}
+  DEDUPE -->|yes| SKIP["Return existing idempotent result"]
+  DEDUPE -->|no| CALL
+  AGG --> VALID{"Manifest, artifact signature and completeness valid?"}
+  VALID -->|yes| PUBLISH["Publish result + preserve original weight version"]
+  VALID -->|no| INVALID["Invalidate; never enter leaderboard"]
+```
+
+### 3. Runtime narrative
+
+```mermaid
+sequenceDiagram
+  actor Researcher
+  participant UI as Next.js UI
+  participant API as FastAPI
+  participant Q as Redis / Celery
+  participant W as Worker
+  participant A as Agent Endpoint
+  participant S as Scorers + Stores
+  Researcher->>UI: configure agent and benchmark run
+  UI->>API: create and freeze manifest
+  API->>Q: enqueue prompt-category shards
+  Q->>W: leased idempotent task
+  W->>A: prompt with tool environment or injected failure
+  A-->>W: transcript, tool calls and response
+  W->>S: raw artifact first; then dimension scoring
+  S-->>API: normalized dimensions, confidence and signatures
+  API-->>UI: published run or invalidation reason
+```
+
+### 4. Reliability model
+
+```mermaid
+stateDiagram-v2
+  [*] --> DRAFT
+  DRAFT --> FROZEN --> QUEUED --> RUNNING
+  RUNNING --> PARTIAL: shards still outstanding
+  PARTIAL --> RUNNING
+  RUNNING --> SCORING --> AGGREGATING --> PUBLISHED
+  RUNNING --> FAILED: terminal infrastructure failure
+  AGGREGATING --> INVALIDATED: incomplete or untrusted evidence
+```
+
+<!-- architecture-atlas-v5:end -->

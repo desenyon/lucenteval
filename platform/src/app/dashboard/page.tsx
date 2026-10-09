@@ -1,7 +1,7 @@
 "use client";
 import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
-import { runsApi, type Run } from "@/lib/api";
+import { runsApi, type RunSummary as Run } from "@/lib/api";
 import { ScoreBadge } from "@/components/ScoreBadge";
 import { formatDistanceToNow } from "date-fns";
 

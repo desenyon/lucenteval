@@ -1,18 +1,23 @@
-import uuid
 import json
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+import math
+import uuid
+
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from ...core.database import get_db
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from ...core.auth import require_scope
 from ...core.config import get_settings
-from ...models.run import Run
-from ...models.result import Result
+from ...core.credentials import encrypt_secret
+from ...core.database import get_db
 from ...models.prompt import Prompt
-from ...schemas.run import RunCreate, RunRead, RunSummary
+from ...models.result import Result
+from ...models.run import Run
 from ...schemas.result import ResultRead, ResultTrace
-import io
+from ...schemas.run import RunCreate, RunRead, RunSummary
+from ...services.manifest import RATES_V1, digest, snapshot
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 settings = get_settings()
@@ -22,10 +27,20 @@ settings = get_settings()
 async def create_run(
     body: RunCreate,
     background_tasks: BackgroundTasks,
+    idempotency_key: str | None = Header(None, max_length=128, min_length=1),
     auth=Depends(require_scope("run:create")),
     db: AsyncSession = Depends(get_db),
 ):
     account, _ = auth
+    request_hash = digest(body.model_dump())
+    if idempotency_key:
+        existing = (
+            await db.execute(select(Run).where(Run.account_id == account.id, Run.idempotency_key == idempotency_key))
+        ).scalar_one_or_none()
+        if existing:
+            if existing.request_hash != request_hash:
+                raise HTTPException(409, "Idempotency key was already used for another request")
+            return existing
     weights = {
         "adversarial": settings.WEIGHT_ADVERSARIAL,
         "tool_misuse": settings.WEIGHT_TOOL_MISUSE,
@@ -34,40 +49,70 @@ async def create_run(
         "latency": settings.WEIGHT_LATENCY,
         "cost": settings.WEIGHT_COST,
     }
-
-    # Count prompts in this corpus version
-    count_result = await db.execute(
-        select(Prompt).where(
-            Prompt.corpus_version == body.corpus_version,
-            Prompt.is_active == True,
-            Prompt.in_quarantine == False,
+    if any(not math.isfinite(w) or w < 0 for w in weights.values()) or sum(weights.values()) <= 0:
+        raise HTTPException(503, "Invalid scoring weights configuration")
+    prompts = (
+        (
+            await db.execute(
+                select(Prompt)
+                .where(
+                    Prompt.corpus_version == body.corpus_version,
+                    Prompt.is_active.is_(True),
+                    Prompt.in_quarantine.is_(False),
+                )
+                .order_by(Prompt.id)
+            )
         )
+        .scalars()
+        .all()
     )
-    prompts = count_result.scalars().all()
-
+    if not prompts:
+        raise HTTPException(422, "Corpus has no active prompts")
+    snapshots = [snapshot(prompt) for prompt in prompts]
+    encrypted = None
+    if body.headers:
+        try:
+            encrypted = encrypt_secret(json.dumps(body.headers))
+        except ValueError:
+            raise HTTPException(503, "Credential encryption is not configured") from None
+    manifest_hash = digest({"prompts": snapshots, "weights": weights, "rates": RATES_V1, "scorer_version": "v2"})
     run = Run(
         account_id=account.id,
         endpoint_url=body.endpoint_url,
-        headers=body.headers,
+        headers={},
+        headers_encrypted=encrypted,
         system_prompt=body.system_prompt,
         corpus_version=body.corpus_version,
         status="pending",
         prompt_count=len(prompts),
         weights_version="v1",
         weights_snapshot=weights,
+        scorer_version="v2",
+        rates_snapshot=RATES_V1,
+        manifest_sha256=manifest_hash,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
     )
     db.add(run)
-    await db.flush()
-
-    # Create result placeholders
-    for prompt in prompts:
-        result = Result(run_id=run.id, prompt_id=prompt.id, status="pending")
-        db.add(result)
-
-    # Enqueue runner task (async via Celery)
+    try:
+        await db.flush()
+        for prompt, frozen in zip(prompts, snapshots, strict=True):
+            db.add(Result(run_id=run.id, prompt_id=prompt.id, prompt_snapshot=frozen, status="pending"))
+        # Commit the work ledger before publishing. Beat repairs a failed/lost publication.
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        if not idempotency_key:
+            raise
+        existing = (
+            await db.execute(select(Run).where(Run.account_id == account.id, Run.idempotency_key == idempotency_key))
+        ).scalar_one()
+        if existing.request_hash != request_hash:
+            raise HTTPException(409, "Idempotency key was already used for another request") from None
+        return existing
     from ...workers.tasks import dispatch_run
-    background_tasks.add_task(dispatch_run, str(run.id))
 
+    background_tasks.add_task(dispatch_run, str(run.id))
     return run
 
 
@@ -120,6 +165,7 @@ async def list_results(
     q = (
         select(Result)
         .where(Result.run_id == run_id)
+        .order_by(Result.prompt_id)
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -139,9 +185,7 @@ async def get_result_trace(
     if not run_result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Run not found")
 
-    result = await db.execute(
-        select(Result).where(Result.run_id == run_id, Result.prompt_id == prompt_id)
-    )
+    result = await db.execute(select(Result).where(Result.run_id == run_id, Result.prompt_id == prompt_id))
     row = result.scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Result not found")
@@ -159,7 +203,7 @@ async def export_run(
     if not run_result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Run not found")
 
-    result = await db.execute(select(Result).where(Result.run_id == run_id))
+    result = await db.execute(select(Result).where(Result.run_id == run_id).order_by(Result.prompt_id))
     rows = result.scalars().all()
 
     def ndjson_stream():

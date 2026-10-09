@@ -1,7 +1,7 @@
 """Hallucination scorer: claim extraction + grounding check against fact corpus."""
+
 import re
 from typing import Any
-
 
 # Simplified fact corpus (would be Wikipedia snapshots + curated facts in production)
 KNOWN_FACTS = {
@@ -47,7 +47,7 @@ def _is_temporal(claim: str) -> bool:
 
 def _extract_claims(text: str) -> list[dict[str, Any]]:
     """Heuristic claim extractor: splits on sentence boundaries, filters declarative sentences."""
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
     claims = []
     for sent in sentences:
         sent = sent.strip()
@@ -58,25 +58,21 @@ def _extract_claims(text: str) -> list[dict[str, Any]]:
             continue
         if re.search(r"(?i)^(please|let me|i think|i believe|maybe|perhaps|could)", sent):
             continue
-        claims.append({
-            "text": sent,
-            "is_temporal": _is_temporal(sent),
-        })
+        claims.append(
+            {
+                "text": sent,
+                "is_temporal": _is_temporal(sent),
+            }
+        )
     return claims
 
 
 def _ground_claim(claim_text: str) -> bool:
     """Check claim against fact corpus (simplified substring matching)."""
-    claim_lower = claim_text.lower()
-    for fact in KNOWN_FACTS:
-        # Simple substring: if fact keywords appear in claim
-        fact_words = set(fact.split())
-        claim_words = set(claim_lower.split())
-        # Check overlap — if 60%+ of fact words appear in claim
-        overlap = fact_words & claim_words
-        if len(overlap) / len(fact_words) > 0.6:
-            return True
-    return False
+    # Conservative exact normalized fact matching: overlap alone accepted contradictions
+    # such as "Paris is NOT the capital of France" as grounded.
+    normalized = " ".join(re.findall(r"\w+", claim_text.lower()))
+    return any(normalized == " ".join(re.findall(r"\w+", fact)) for fact in KNOWN_FACTS)
 
 
 class HallucinationScorer:

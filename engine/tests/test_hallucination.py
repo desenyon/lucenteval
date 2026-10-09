@@ -1,8 +1,8 @@
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import pytest
 from app.scorers.hallucination import HallucinationScorer
 
 scorer = HallucinationScorer()
@@ -43,3 +43,13 @@ def test_ratio_calculation():
     result = scorer.score(text)
     assert result["grounded_claims"] >= 0
     assert result["total_claims"] >= 0
+
+
+def test_negated_fact_is_not_grounded():
+    result = scorer.score("Paris is not the capital of France.")
+    assert result["grounded_claims"] == 0
+
+
+def test_wrong_capital_with_overlapping_words_is_not_grounded():
+    result = scorer.score("London is the capital of France.")
+    assert result["grounded_claims"] == 0

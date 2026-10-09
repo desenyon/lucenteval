@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+
 from pydantic import BaseModel
 
 
@@ -26,6 +27,10 @@ class ResultRead(BaseModel):
 
 
 class ResultTrace(ResultRead):
+    prompt_snapshot: dict | None
+    raw_payload: dict | None
+    attempt_count: int
+    score_attempt_count: int
     rationale_adversarial: dict | None
     rationale_tool_misuse: dict | None
     rationale_hallucination: dict | None

@@ -1,10 +1,14 @@
 import uuid
 from datetime import datetime
-from pydantic import BaseModel, HttpUrl
+
+from pydantic import BaseModel, field_validator
+
+from ..core.outbound import validate_url
 
 
 class WebhookCreate(BaseModel):
     url: str
+    _url = field_validator("url")(validate_url)
     description: str | None = None
 
 

@@ -1,6 +1,8 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 from typing import Literal
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -8,6 +10,17 @@ class Settings(BaseSettings):
 
     ENV: Literal["local", "staging", "production"] = "local"
     DEBUG: bool = False
+
+    CREDENTIAL_ENCRYPTION_KEY: str = ""
+    ADMIN_TOKEN: str = ""
+    OUTBOUND_LOCAL_HOSTS: list[str] = []
+    CORS_ORIGINS: list[str] = ["http://localhost:3000"]
+    PLATFORM_URL: str = "http://localhost:3000"
+    ARCHIVE_RESPONSES: bool = False
+    WORK_LEASE_SECONDS: int = Field(default=600, ge=300, le=86400)
+    MAX_WORK_ATTEMPTS: int = Field(default=4, ge=1, le=10)
+    RETRY_DELAY_SECONDS: int = Field(default=30, ge=1, le=3600)
+    MAX_RESPONSE_BYTES: int = Field(default=2_000_000, ge=1024, le=20_000_000)
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://lucent:lucent@localhost:5432/lucenteval"
@@ -39,7 +52,7 @@ class Settings(BaseSettings):
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
 
     # Rate limiting defaults (requests per minute)
-    DEFAULT_RATE_LIMIT_RPM: int = 60
+    DEFAULT_RATE_LIMIT_RPM: int = Field(default=60, ge=1, le=10000)
 
     # Corpus
     CORPUS_VERSION: str = "v1"
@@ -53,7 +66,7 @@ class Settings(BaseSettings):
     WEIGHT_COST: float = 0.10
 
     # Webhook
-    WEBHOOK_MAX_RETRIES: int = 5
+    WEBHOOK_MAX_RETRIES: int = Field(default=5, ge=0, le=10)
 
 
 @lru_cache

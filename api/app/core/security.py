@@ -1,7 +1,8 @@
-import secrets
 import hashlib
 import hmac
-from datetime import datetime, timezone
+import secrets
+from datetime import UTC, datetime
+
 from .config import get_settings
 
 settings = get_settings()
@@ -37,4 +38,4 @@ def verify_webhook_signature(payload: bytes, secret: str, signature: str) -> boo
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)

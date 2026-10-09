@@ -1,13 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request
-from sqlalchemy.ext.asyncio import AsyncSession
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
-from ...core.database import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from ...core.auth import get_current_account
+from ...core.database import get_db
 from ...core.security import generate_api_key, utcnow
 from ...models.api_key import ApiKey
 from ...models.audit_log import AuditLog
-from ...schemas.api_key import ApiKeyCreate, ApiKeyRead, ApiKeyCreateResponse
-import uuid
+from ...schemas.api_key import ApiKeyCreate, ApiKeyCreateResponse, ApiKeyRead
 
 router = APIRouter(prefix="/keys", tags=["keys"])
 
@@ -19,7 +21,9 @@ async def create_key(
     auth=Depends(get_current_account),
     db: AsyncSession = Depends(get_db),
 ):
-    account, _ = auth
+    account, parent_key = auth
+    if not set(body.scopes).issubset(parent_key.scopes) or body.rate_limit_rpm > parent_key.rate_limit_rpm:
+        raise HTTPException(403, "Child keys cannot exceed the issuing key scopes or rate limit")
     raw_key, key_hash = generate_api_key()
 
     api_key = ApiKey(
@@ -31,6 +35,7 @@ async def create_key(
         rate_limit_rpm=body.rate_limit_rpm,
     )
     db.add(api_key)
+    await db.flush()
 
     log = AuditLog(
         account_id=account.id,
@@ -38,7 +43,7 @@ async def create_key(
         resource_type="api_key",
         resource_id=str(api_key.id),
         actor_ip=request.client.host if request.client else None,
-        metadata={"name": body.name, "scopes": list(body.scopes)},
+        details={"name": body.name, "scopes": list(body.scopes)},
     )
     db.add(log)
     await db.flush()
@@ -59,7 +64,7 @@ async def create_key(
 @router.get("", response_model=list[ApiKeyRead])
 async def list_keys(auth=Depends(get_current_account), db: AsyncSession = Depends(get_db)):
     account, _ = auth
-    result = await db.execute(select(ApiKey).where(ApiKey.account_id == account.id, ApiKey.is_active == True))
+    result = await db.execute(select(ApiKey).where(ApiKey.account_id == account.id, ApiKey.is_active.is_(True)))
     return result.scalars().all()
 
 
@@ -71,9 +76,7 @@ async def revoke_key(
     db: AsyncSession = Depends(get_db),
 ):
     account, _ = auth
-    result = await db.execute(
-        select(ApiKey).where(ApiKey.id == key_id, ApiKey.account_id == account.id)
-    )
+    result = await db.execute(select(ApiKey).where(ApiKey.id == key_id, ApiKey.account_id == account.id))
     api_key = result.scalar_one_or_none()
     if not api_key:
         raise HTTPException(status_code=404, detail="Key not found")
@@ -87,6 +90,6 @@ async def revoke_key(
         resource_type="api_key",
         resource_id=str(key_id),
         actor_ip=request.client.host if request.client else None,
-        metadata={},
+        details={},
     )
     db.add(log)

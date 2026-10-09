@@ -1,33 +1,35 @@
-from fastapi import Depends, HTTPException, Security, status, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from ..models.api_key import ApiKey
-from ..models.account import Account
-from ..core.database import get_db
-from ..core.security import verify_api_key
-from ..core.redis import get_redis
 import time
 
-security = HTTPBearer()
+from fastapi import Depends, HTTPException, Request, Security, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..core.database import get_db
+from ..core.redis import get_redis
+from ..models.account import Account
+from ..models.api_key import ApiKey
+
+security = HTTPBearer(auto_error=False)
 
 
 async def get_current_account(
     request: Request,
-    credentials: HTTPAuthorizationCredentials = Security(security),
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
     db: AsyncSession = Depends(get_db),
 ) -> tuple[Account, ApiKey]:
+    if credentials is None:
+        raise HTTPException(401, "Bearer API key required")
     raw_key = credentials.credentials
     redis = get_redis()
 
-    # Enforce rate limiting first (token bucket in Redis)
+    # Look up and validate the key before applying the fixed-window limiter.
     # Look up key hash
     import hashlib
+
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
 
-    result = await db.execute(
-        select(ApiKey).where(ApiKey.key_hash == key_hash)
-    )
+    result = await db.execute(select(ApiKey).where(ApiKey.key_hash == key_hash))
     api_key = result.scalar_one_or_none()
 
     if not api_key:
@@ -36,7 +38,7 @@ async def get_current_account(
     if not api_key.is_active or api_key.revoked_at is not None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API key revoked")
 
-    # Token bucket rate limiting
+    # Fixed minute-window rate limiting
     bucket_key = f"ratelimit:{api_key.id}"
     rpm = api_key.rate_limit_rpm
     now = int(time.time())
@@ -57,10 +59,11 @@ async def get_current_account(
 
     # Update last_used_at
     from ..core.security import utcnow
+
     api_key.last_used_at = utcnow()
 
-    result = await db.execute(select(Account).where(Account.id == api_key.account_id))
-    account = result.scalar_one_or_none()
+    account_result = await db.execute(select(Account).where(Account.id == api_key.account_id))
+    account = account_result.scalar_one_or_none()
 
     if not account or not account.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account inactive")
@@ -74,4 +77,5 @@ def require_scope(scope: str):
         if scope not in api_key.scopes:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Missing scope: {scope}")
         return account, api_key
+
     return checker

@@ -1,8 +1,11 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, DateTime, Text, ForeignKey, Float, Integer, JSON, Boolean
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from typing import TYPE_CHECKING
+
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from ..core.database import Base
 from ..core.security import utcnow
 
@@ -11,8 +14,22 @@ class Result(Base):
     __tablename__ = "results"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True)
-    prompt_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("prompts.id"), nullable=False, index=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    prompt_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("prompts.id"), nullable=False, index=True
+    )
+
+    prompt_snapshot: Mapped[dict | None] = mapped_column(JSON)
+    raw_payload: Mapped[dict | None] = mapped_column(JSON)
+    claim_token: Mapped[str | None] = mapped_column(String(36))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    score_attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    __table_args__ = (UniqueConstraint("run_id", "prompt_id", name="uq_result_prompt"),)
 
     # Raw response (full payload stored in S3; this is metadata)
     s3_key: Mapped[str | None] = mapped_column(String(512))
@@ -51,3 +68,8 @@ class Result(Base):
 
     run: Mapped["Run"] = relationship("Run", back_populates="results")
     prompt: Mapped["Prompt"] = relationship("Prompt")
+
+
+if TYPE_CHECKING:
+    from .prompt import Prompt
+    from .run import Run

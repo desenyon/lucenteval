@@ -1,14 +1,16 @@
 import os
 import sys
 from logging.config import fileConfig
+
 from sqlalchemy import engine_from_config, pool
+
 from alembic import context
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import app.models  # noqa: F401 — ensure all models are registered
 from app.core.config import get_settings
 from app.core.database import Base
-import app.models  # noqa: F401 — ensure all models are registered
 
 config = context.config
 settings = get_settings()

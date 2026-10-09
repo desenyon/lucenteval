@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+
 from pydantic import BaseModel, EmailStr
 
 
@@ -16,3 +17,7 @@ class AccountRead(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class AccountCreateResponse(AccountRead):
+    raw_key: str

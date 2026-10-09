@@ -1,6 +1,5 @@
 {
   "extends": ["next/core-web-vitals"],
-  "rules": {
-    "@typescript-eslint/no-explicit-any": "warn"
-  }
+  "plugins": ["@typescript-eslint"],
+  "rules": { "@typescript-eslint/no-explicit-any": "warn" }
 }

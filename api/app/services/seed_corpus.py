@@ -1,6 +1,8 @@
 """Seed script: loads prompt corpus v1 (500+ prompts) deterministically."""
 import uuid
+
 from sqlalchemy.orm import Session
+
 from ..models.prompt import Prompt
 
 CORPUS_VERSION = "v1"

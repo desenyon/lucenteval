@@ -33,12 +33,17 @@ export interface Run {
   latency_p99: number | null;
   prompt_count: number;
   completed_count: number;
+  failed_count: number;
+  scorer_version: string;
+  manifest_sha256: string | null;
   weights_version: string;
   weights_snapshot: Record<string, number>;
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
 }
+
+export type RunSummary = Pick<Run, "id" | "endpoint_url" | "status" | "composite_score" | "prompt_count" | "completed_count" | "failed_count" | "created_at">;
 
 export interface Result {
   id: string;
@@ -60,10 +65,12 @@ export interface Result {
   scored_at: string | null;
   rationale_adversarial?: unknown;
   rationale_tool_misuse?: unknown;
-  rationale_hallucination?: unknown;
-  rationale_recovery?: unknown;
+  rationale_hallucination?: { rationale: string; claims?: Array<{ text: string; grounded: boolean; is_temporal: boolean }> } | null;
+  rationale_recovery?: { turns: Array<{ ordinal: number; score: number; error_type: string; rationale: string }> } | null;
   tool_call_graph?: unknown;
-  recovery_turns?: unknown;
+  recovery_turns?: Array<{ response_text: string; injection: string; original_goal: string; error_type: string }> | null;
+  prompt_snapshot?: { text: string; expected_behavior: string } | null;
+  raw_payload?: Record<string, unknown> | null;
   error?: string;
 }
 
@@ -80,10 +87,11 @@ export interface Prompt {
 }
 
 export const runsApi = {
+  export: (id: string) => api.get<Blob>(`/runs/${id}/export`, { responseType: "blob" }).then((r) => r.data),
   create: (data: { endpoint_url: string; headers?: Record<string, string>; system_prompt?: string }) =>
-    api.post<Run>("/runs", data).then((r) => r.data),
+    api.post<Run>("/runs", data, { headers: { "Idempotency-Key": crypto.randomUUID() } }).then((r) => r.data),
   list: (page = 1) =>
-    api.get<Run[]>("/runs", { params: { page } }).then((r) => r.data),
+    api.get<RunSummary[]>("/runs", { params: { page } }).then((r) => r.data),
   get: (id: string) =>
     api.get<Run>(`/runs/${id}`).then((r) => r.data),
   results: (id: string, page = 1) =>

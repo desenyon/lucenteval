@@ -1,378 +1,445 @@
-"""Celery tasks for the agent runner and scoring pipeline."""
-import asyncio
+"""Database-backed work ledger; Celery messages contain only identifiers.
+
+Claims are bounded leases and writes are fenced by a unique token. Reconciliation
+repairs lost broker publications and worker crashes. External effects are at least
+once: agents/receivers can deduplicate using the stable Idempotency-Key header.
+"""
+
 import json
+import math
 import time
 import uuid
-import io
-from datetime import datetime, timezone
-from typing import Any
+from datetime import timedelta
+from functools import lru_cache
 
-import boto3
-import httpx
-from celery import shared_task
 from celery.utils.log import get_task_logger
+from engine.app.scorers.adversarial import AdversarialScorer
+from engine.app.scorers.composite import CompositeScorer
+from engine.app.scorers.cost import CostScorer
+from engine.app.scorers.hallucination import HallucinationScorer
+from engine.app.scorers.latency import LatencyScorer
+from engine.app.scorers.recovery import RecoveryScorer
+from engine.app.scorers.tool_misuse import ToolMisuseScorer
+from sqlalchemy import and_, create_engine, or_, select, update
+from sqlalchemy.orm import sessionmaker
 
-from .celery_app import celery_app
 from ..core.config import get_settings
+from ..core.credentials import decrypt_secret
+from ..core.outbound import agent_response, extract_text, post_json
+from ..core.security import sign_webhook_payload, utcnow
+from ..models import Delivery, Result, Run, Webhook
+from ..services.manifest import compute_cost
+from .celery_app import celery_app
 
 logger = get_task_logger(__name__)
 settings = get_settings()
+DIMENSIONS = ("adversarial", "tool_misuse", "hallucination", "recovery", "latency", "cost")
+TERMINAL_RUNS = ("completed", "failed")
+
+
+@lru_cache
+def _session_factory():
+    engine = create_engine(settings.DATABASE_URL_SYNC, pool_pre_ping=True)
+    return sessionmaker(bind=engine, expire_on_commit=False)
 
 
 def _get_db_sync():
-    """Synchronous DB session for Celery tasks."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    engine = create_engine(settings.DATABASE_URL_SYNC, pool_pre_ping=True)
-    Session = sessionmaker(bind=engine)
-    return Session()
+    return _session_factory()()
 
 
-def _s3_client():
-    return boto3.client(
-        "s3",
-        endpoint_url=settings.S3_ENDPOINT_URL,
-        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-        region_name=settings.AWS_REGION,
-    )
+def _publish(task, *args):
+    try:
+        task.apply_async(args=list(args))
+    except Exception as exc:
+        logger.warning("Publish deferred to reconciler: %s", type(exc).__name__)
+
+
+def _due(model):
+    return or_(model.next_attempt_at.is_(None), model.next_attempt_at <= utcnow())
 
 
 def dispatch_run(run_id: str):
-    """Called from FastAPI background task — enqueues all runner jobs."""
-    from ..models.run import Run
-    from ..models.result import Result
-    from ..models.prompt import Prompt
-
-    db = _get_db_sync()
-    try:
-        run = db.query(Run).filter(Run.id == uuid.UUID(run_id)).first()
-        if not run:
+    """Best-effort immediate dispatch, safe to repeat after the submission commits."""
+    with _get_db_sync() as db:
+        run = db.get(Run, uuid.UUID(run_id))
+        if not run or run.status in TERMINAL_RUNS:
             return
-
-        run.status = "running"
-        run.started_at = datetime.now(timezone.utc)
-        db.commit()
-
-        results = db.query(Result).filter(Result.run_id == run.id).all()
-        for result in results:
-            run_prompt.apply_async(
-                args=[str(run.id), str(result.id)],
-                queue="runner",
-            )
-    finally:
-        db.close()
-
-
-@celery_app.task(bind=True, queue="runner", max_retries=3, default_retry_delay=30)
-def run_prompt(self, run_id: str, result_id: str):
-    """Execute one prompt against the developer's agent endpoint."""
-    from ..models.run import Run
-    from ..models.result import Result
-    from ..models.prompt import Prompt
-
-    db = _get_db_sync()
-    try:
-        run = db.query(Run).filter(Run.id == uuid.UUID(run_id)).first()
-        result = db.query(Result).filter(Result.id == uuid.UUID(result_id)).first()
-        if not run or not result:
-            return
-
-        prompt = db.query(Prompt).filter(Prompt.id == result.prompt_id).first()
-        if not prompt:
-            return
-
-        result.status = "running"
-        db.commit()
-
-        # Build messages
-        messages = []
-        if run.system_prompt:
-            messages.append({"role": "system", "content": run.system_prompt})
-        messages.append({"role": "user", "content": prompt.text})
-
-        # Call the developer's endpoint via LiteLLM-compatible interface
-        start_ts = time.perf_counter()
-        try:
-            with httpx.Client(timeout=120.0) as client:
-                resp = client.post(
-                    run.endpoint_url,
-                    headers={**run.headers, "Content-Type": "application/json"},
-                    json={"messages": messages},
-                )
-                resp.raise_for_status()
-                raw_payload = resp.json()
-        except Exception as exc:
-            result.status = "error"
-            result.error = str(exc)
-            db.commit()
-            # Retry with backoff
-            raise self.retry(exc=exc)
-
-        latency_ms = int((time.perf_counter() - start_ts) * 1000)
-
-        # Extract token counts from OpenAI-compatible response
-        usage = raw_payload.get("usage", {})
-        input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens")
-        output_tokens = usage.get("completion_tokens") or usage.get("output_tokens")
-
-        # Compute cost from provider rate table
-        cost_usd = _compute_cost(raw_payload.get("model", ""), input_tokens, output_tokens)
-
-        # Store raw payload in S3
-        s3_key = f"runs/{run_id}/results/{result_id}.json"
-        try:
-            s3 = _s3_client()
-            s3.put_object(
-                Bucket=settings.S3_BUCKET,
-                Key=s3_key,
-                Body=json.dumps(raw_payload).encode(),
-                ContentType="application/json",
-            )
-        except Exception as e:
-            logger.warning(f"S3 upload failed for {s3_key}: {e}")
-            s3_key = None
-
-        # Atomic write: all fields in one transaction
-        result.s3_key = s3_key
-        result.latency_ms = latency_ms
-        result.input_tokens = input_tokens
-        result.output_tokens = output_tokens
-        result.cost_usd = cost_usd
-        result.captured_at = datetime.now(timezone.utc)
-        result.status = "captured"
-        db.commit()
-
-        # Enqueue scoring
-        score_result.apply_async(
-            args=[run_id, result_id, json.dumps(raw_payload)],
-            queue="scorer",
-        )
-
-    finally:
-        db.close()
-
-
-@celery_app.task(bind=True, queue="scorer")
-def score_result(self, run_id: str, result_id: str, raw_payload_json: str):
-    """Run all 6 scorers on a captured result."""
-    from ..models.run import Run
-    from ..models.result import Result
-    from ..models.prompt import Prompt
-
-    db = _get_db_sync()
-    try:
-        run = db.query(Run).filter(Run.id == uuid.UUID(run_id)).first()
-        result = db.query(Result).filter(Result.id == uuid.UUID(result_id)).first()
-        if not run or not result:
-            return
-
-        prompt = db.query(Prompt).filter(Prompt.id == result.prompt_id).first()
-        raw_payload = json.loads(raw_payload_json)
-
-        # Extract response text
-        response_text = _extract_text(raw_payload)
-
-        # Import scorers lazily
-        from ...engine.app.scorers.adversarial import AdversarialScorer
-        from ...engine.app.scorers.tool_misuse import ToolMisuseScorer
-        from ...engine.app.scorers.hallucination import HallucinationScorer
-        from ...engine.app.scorers.latency import LatencyScorer
-        from ...engine.app.scorers.cost import CostScorer
-        from ...engine.app.scorers.composite import CompositeScorer
-
-        adv = AdversarialScorer().score(prompt.text, response_text, prompt.expected_behavior)
-        tool = ToolMisuseScorer().score(raw_payload)
-        hall = HallucinationScorer().score(response_text)
-        lat = LatencyScorer().score(result.latency_ms, run_id, db)
-        cost_score = CostScorer().score(result.cost_usd, run_id, db)
-
-        weights = run.weights_snapshot
-        composite = CompositeScorer(weights).score({
-            "adversarial": adv["score"],
-            "tool_misuse": tool["score"],
-            "hallucination": hall["score"],
-            "recovery": None,  # recovery is separate multi-turn harness
-            "latency": lat["score"],
-            "cost": cost_score["score"],
-        })
-
-        result.score_adversarial = adv["score"]
-        result.score_tool_misuse = tool["score"]
-        result.score_hallucination = hall["score"]
-        result.score_latency = lat["score"]
-        result.score_cost = cost_score["score"]
-        result.composite_score = composite["score"]
-        result.rationale_adversarial = adv
-        result.rationale_tool_misuse = tool
-        result.rationale_hallucination = hall
-        result.rationale_recovery = None
-        result.tool_call_graph = tool.get("call_graph")
-        result.scored_at = datetime.now(timezone.utc)
-        result.status = "scored"
-        db.commit()
-
-        # Check if all results for this run are scored → finalize run
+        rows = db.scalars(select(Result).where(Result.run_id == run.id, _due(Result))).all()
+        for row in rows:
+            if row.status == "pending" or (row.status == "running" and _expired(row.lease_expires_at)):
+                _publish(run_prompt, run_id, str(row.id))
+            elif row.status == "captured" or (row.status == "scoring" and _expired(row.lease_expires_at)):
+                _publish(score_result, run_id, str(row.id))
         _maybe_finalize_run(run_id, db)
 
-    finally:
-        db.close()
+
+def _expired(value):
+    # SQLite drops timezone info; production PostgreSQL preserves it.
+    return value is None or value.replace(tzinfo=utcnow().tzinfo) <= utcnow()
+
+
+@celery_app.task(queue="runner")
+def reconcile_work():
+    """Run every 30s with one Beat scheduler; repeated scans are harmless."""
+    with _get_db_sync() as db:
+        # Scan all active IDs so long-lived runs do not starve newer submissions.
+        ids = db.scalars(select(Run.id).where(Run.status.not_in(TERMINAL_RUNS))).all()
+        for run_id in ids:
+            dispatch_run(str(run_id))
+        deliveries = db.scalars(
+            select(Delivery).where(Delivery.status.in_(["pending", "sending"]), _due(Delivery))
+        ).all()
+        for delivery in deliveries:
+            if delivery.status == "pending" or _expired(delivery.lease_expires_at):
+                _publish(deliver_webhook, str(delivery.id))
+
+
+def _claim(db, run_id: str, result_id: str, scoring: bool = False):
+    ready, working = ("captured", "scoring") if scoring else ("pending", "running")
+    token = str(uuid.uuid4())
+    count = Result.score_attempt_count if scoring else Result.attempt_count
+    stmt = (
+        update(Result)
+        .where(
+            Result.id == uuid.UUID(result_id),
+            Result.run_id == uuid.UUID(run_id),
+            _due(Result),
+            or_(
+                Result.status == ready,
+                and_(
+                    Result.status == working,
+                    or_(Result.lease_expires_at.is_(None), Result.lease_expires_at <= utcnow()),
+                ),
+            ),
+            Result.run_id.in_(select(Run.id).where(Run.status.not_in(TERMINAL_RUNS))),
+        )
+        .values(
+            status=working,
+            claim_token=token,
+            lease_expires_at=utcnow() + timedelta(seconds=settings.WORK_LEASE_SECONDS),
+            **{count.key: count + 1},
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if db.execute(stmt).rowcount != 1:
+        db.rollback()
+        return None
+    db.execute(
+        update(Run)
+        .where(Run.id == uuid.UUID(run_id), Run.status == "pending")
+        .values(status="running", started_at=utcnow())
+    )
+    db.commit()
+    db.expire_all()
+    result = db.get(Result, uuid.UUID(result_id))
+    if getattr(result, count.key) > settings.MAX_WORK_ATTEMPTS:
+        _store(db, result.id, token, {"status": "error", "error": "attempts_exhausted"})
+        _maybe_finalize_run(run_id, db)
+        return None
+    return result, token
+
+
+def _store(db, result_id, token, values) -> bool:
+    changed = db.execute(
+        update(Result)
+        .where(
+            Result.id == result_id,
+            Result.claim_token == token,
+            Result.lease_expires_at > utcnow(),
+            Result.status.in_(["running", "scoring"]),
+        )
+        .values(**values, claim_token=None, lease_expires_at=None)
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    db.commit()
+    return changed == 1
+
+
+def _work_failed(db, result, token, exc, scoring=False):
+    attempts = result.score_attempt_count if scoring else result.attempt_count
+    terminal = attempts >= settings.MAX_WORK_ATTEMPTS
+    status = "error" if terminal else ("captured" if scoring else "pending")
+    _store(
+        db,
+        result.id,
+        token,
+        {
+            "status": status,
+            # Exception messages may contain credentials or response bodies. Keep a safe code only.
+            "error": ("scoring_" if scoring else "agent_") + type(exc).__name__,
+            "next_attempt_at": utcnow() + timedelta(seconds=settings.RETRY_DELAY_SECONDS * 2 ** (attempts - 1)),
+        },
+    )
+    _maybe_finalize_run(str(result.run_id), db)
+
+
+def _usage(payload):
+    usage = payload.get("usage", {})
+    return (
+        usage.get("prompt_tokens", usage.get("input_tokens")),
+        usage.get("completion_tokens", usage.get("output_tokens")),
+    )
+
+
+@celery_app.task(queue="runner")
+def run_prompt(run_id: str, result_id: str):
+    with _get_db_sync() as db:
+        claimed = _claim(db, run_id, result_id)
+        if not claimed:
+            return
+        result, token = claimed
+        run = db.get(Run, result.run_id)
+        try:
+            frozen = result.prompt_snapshot
+            if not frozen:
+                raise ValueError("Missing frozen prompt")
+            headers = json.loads(decrypt_secret(run.headers_encrypted)) if run.headers_encrypted else {}
+            messages = []
+            if run.system_prompt:
+                messages.append({"role": "system", "content": run.system_prompt})
+            messages.append({"role": "user", "content": frozen["text"]})
+            start = time.perf_counter()
+            payload = agent_response(run.endpoint_url, headers, messages, f"{result_id}:initial")
+            input_tokens, output_tokens = _usage(payload)
+            cost = compute_cost(payload.get("model", ""), input_tokens, output_tokens, run.rates_snapshot)
+            turns = []
+            if scenario := frozen.get("recovery"):
+                # Synthetic context is a user turn, not a forged tool message without a call ID.
+                messages += [
+                    {"role": "assistant", "content": extract_text(payload)},
+                    {"role": "user", "content": scenario["injection"]},
+                ]
+                recovered = agent_response(run.endpoint_url, headers, messages, f"{result_id}:recovery")
+                turns.append(
+                    {
+                        **scenario,
+                        "response_text": extract_text(recovered),
+                        "raw_payload": recovered,
+                        "messages": messages,
+                    }
+                )
+                in2, out2 = _usage(recovered)
+                cost2 = compute_cost(recovered.get("model", ""), in2, out2, run.rates_snapshot)
+                input_tokens = input_tokens + in2 if input_tokens is not None and in2 is not None else None
+                output_tokens = output_tokens + out2 if output_tokens is not None and out2 is not None else None
+                cost = round(cost + cost2, 8) if cost is not None and cost2 is not None else None
+            values = {
+                "raw_payload": payload,
+                "recovery_turns": turns,
+                "latency_ms": int((time.perf_counter() - start) * 1000),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cost_usd": cost,
+                "captured_at": utcnow(),
+                "status": "captured",
+                "error": None,
+                "next_attempt_at": None,
+            }
+            stored = _store(db, result.id, token, values)
+        except Exception as exc:
+            db.rollback()
+            _work_failed(db, result, token, exc)
+            return
+        if stored:
+            _publish(score_result, run_id, result_id)
+            if settings.ARCHIVE_RESPONSES:
+                _archive(result_id, run_id, payload, turns)
+
+
+def _archive(result_id, run_id, payload, turns):
+    import boto3
+    from botocore.config import Config
+
+    try:
+        client = boto3.client(
+            "s3",
+            endpoint_url=settings.S3_ENDPOINT_URL or None,
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region_name=settings.AWS_REGION,
+            config=Config(connect_timeout=5, read_timeout=5, retries={"max_attempts": 0}),
+        )
+        key = f"runs/{run_id}/results/{result_id}.json"
+        client.put_object(
+            Bucket=settings.S3_BUCKET,
+            Key=key,
+            Body=json.dumps({"response": payload, "recovery_turns": turns}).encode(),
+            ContentType="application/json",
+        )
+        with _get_db_sync() as db:
+            db.execute(update(Result).where(Result.id == uuid.UUID(result_id)).values(s3_key=key))
+            db.commit()
+    except Exception as exc:
+        logger.warning("Optional archive failed: %s", type(exc).__name__)
+
+
+@celery_app.task(queue="scorer")
+def score_result(run_id: str, result_id: str):
+    with _get_db_sync() as db:
+        claimed = _claim(db, run_id, result_id, scoring=True)
+        if not claimed:
+            return
+        result, token = claimed
+        run = db.get(Run, result.run_id)
+        try:
+            frozen, payload = result.prompt_snapshot, result.raw_payload
+            response_text = extract_text(payload)
+            scores = {
+                "adversarial": AdversarialScorer().score(frozen["text"], response_text, frozen["expected_behavior"]),
+                "tool_misuse": ToolMisuseScorer().score(payload),
+                "hallucination": HallucinationScorer().score(response_text),
+                "recovery": RecoveryScorer().score(result.recovery_turns or []),
+                "latency": LatencyScorer().score(result.latency_ms, run_id, db),
+                "cost": CostScorer().score(result.cost_usd, run_id, db),
+            }
+            values = {f"score_{name}": value["score"] for name, value in scores.items()}
+            values.update(
+                {
+                    f"rationale_{name}": scores[name]
+                    for name in ("adversarial", "tool_misuse", "hallucination", "recovery")
+                }
+            )
+            values.update(
+                {
+                    "composite_score": CompositeScorer(run.weights_snapshot).score(
+                        {name: value["score"] for name, value in scores.items()}
+                    )["score"],
+                    "tool_call_graph": scores["tool_misuse"].get("call_graph"),
+                    "scored_at": utcnow(),
+                    "status": "scored",
+                    "error": None,
+                    "next_attempt_at": None,
+                }
+            )
+            _store(db, result.id, token, values)
+        except Exception as exc:
+            db.rollback()
+            _work_failed(db, result, token, exc, scoring=True)
+            return
+        _maybe_finalize_run(run_id, db)
 
 
 def _maybe_finalize_run(run_id: str, db):
-    from ..models.run import Run
-    from ..models.result import Result
-    import numpy as np
-
-    run = db.query(Run).filter(Run.id == uuid.UUID(run_id)).first()
-    results = db.query(Result).filter(Result.run_id == run.id).all()
-
+    # Take a write lock before reading aggregates. This also serializes the offline
+    # SQLite harness, where SELECT FOR UPDATE alone is ignored.
+    locked = db.execute(
+        update(Run).where(Run.id == uuid.UUID(run_id), Run.status.not_in(TERMINAL_RUNS))
+        .values(status=Run.status).execution_options(synchronize_session=False)
+    ).rowcount
+    if not locked:
+        db.rollback()
+        return
+    # Serialize aggregate updates and outbox creation across concurrent final results.
+    run = db.scalar(
+        select(Run).where(Run.id == uuid.UUID(run_id)).with_for_update().execution_options(populate_existing=True)
+    )
+    if not run or run.status in TERMINAL_RUNS:
+        db.rollback()
+        return
+    results = db.scalars(select(Result).where(Result.run_id == run.id).execution_options(populate_existing=True)).all()
     scored = [r for r in results if r.status == "scored"]
-    if len(scored) < len(results):
-        return  # not done yet
-
-    latencies = [r.latency_ms for r in scored if r.latency_ms]
-    latencies.sort()
-
-    def percentile(arr, p):
-        if not arr:
-            return None
-        idx = int(len(arr) * p / 100)
-        return arr[min(idx, len(arr) - 1)]
-
-    run.latency_p50 = percentile(latencies, 50)
-    run.latency_p95 = percentile(latencies, 95)
-    run.latency_p99 = percentile(latencies, 99)
-
-    # Aggregate per-dimension scores
-    def avg(vals):
-        v = [x for x in vals if x is not None]
-        return sum(v) / len(v) if v else None
-
-    run.score_adversarial = avg([r.score_adversarial for r in scored])
-    run.score_tool_misuse = avg([r.score_tool_misuse for r in scored])
-    run.score_hallucination = avg([r.score_hallucination for r in scored])
-    run.score_recovery = avg([r.score_recovery for r in scored])
-    run.score_latency = avg([r.score_latency for r in scored])
-    run.score_cost = avg([r.score_cost for r in scored])
-    run.completed_count = len(scored)
-
-    weights = run.weights_snapshot
-    dim_scores = {
-        "adversarial": run.score_adversarial,
-        "tool_misuse": run.score_tool_misuse,
-        "hallucination": run.score_hallucination,
-        "recovery": run.score_recovery,
-        "latency": run.score_latency,
-        "cost": run.score_cost,
+    errors = [r for r in results if r.status == "error"]
+    run.completed_count, run.failed_count = len(scored), len(errors)
+    if len(scored) + len(errors) != run.prompt_count or len(results) != run.prompt_count:
+        db.commit()
+        return
+    for name in DIMENSIONS:
+        values = [getattr(r, f"score_{name}") for r in scored if getattr(r, f"score_{name}") is not None]
+        setattr(run, f"score_{name}", sum(values) / len(values) if values else None)
+    latencies = sorted(r.latency_ms for r in scored if r.latency_ms is not None)
+    for p in (50, 95, 99):
+        setattr(run, f"latency_p{p}", latencies[max(0, math.ceil(len(latencies) * p / 100) - 1)] if latencies else None)
+    # Failed runs expose partial dimensions for diagnosis but never rank as successful.
+    run.status = "failed" if errors or not results else "completed"
+    run.composite_score = (
+        None
+        if run.status == "failed"
+        else CompositeScorer(run.weights_snapshot).score({name: getattr(run, f"score_{name}") for name in DIMENSIONS})[
+            "score"
+        ]
+    )
+    run.completed_at = utcnow()
+    run.headers = {}
+    run.headers_encrypted = None
+    payload = {
+        "run_id": str(run.id),
+        "status": run.status,
+        "composite_score": run.composite_score,
+        "scores_by_dimension": {name: getattr(run, f"score_{name}") for name in DIMENSIONS},
+        "completed_count": run.completed_count,
+        "failed_count": run.failed_count,
+        "run_url": f"{settings.PLATFORM_URL.rstrip('/')}/dashboard/runs/{run.id}",
     }
-    total_w = sum(weights[k] for k, v in dim_scores.items() if v is not None)
-    composite = sum(weights[k] * v for k, v in dim_scores.items() if v is not None)
-    run.composite_score = composite / total_w if total_w > 0 else None
-    run.status = "completed"
-    run.completed_at = datetime.now(timezone.utc)
+    for hook in db.scalars(select(Webhook).where(Webhook.account_id == run.account_id, Webhook.is_active.is_(True))):
+        db.add(Delivery(run_id=run.id, webhook_id=hook.id, payload=payload))
     db.commit()
 
-    # Deliver webhooks
-    from ..models.webhook import Webhook
-    webhooks = db.query(Webhook).filter(
-        Webhook.account_id == run.account_id,
-        Webhook.is_active == True,
-    ).all()
-    for webhook in webhooks:
-        deliver_webhook.apply_async(args=[str(webhook.id), run_id], queue="webhook")
 
-
-@celery_app.task(bind=True, queue="webhook", max_retries=5)
-def deliver_webhook(self, webhook_id: str, run_id: str):
-    """Deliver run completion event to a registered webhook URL."""
-    from ..models.webhook import Webhook
-    from ..models.run import Run
-    import hashlib
-
-    db = _get_db_sync()
-    try:
-        webhook = db.query(Webhook).filter(Webhook.id == uuid.UUID(webhook_id)).first()
-        run = db.query(Run).filter(Run.id == uuid.UUID(run_id)).first()
-        if not webhook or not run:
+@celery_app.task(queue="webhook")
+def deliver_webhook(delivery_id: str):
+    with _get_db_sync() as db:
+        token = str(uuid.uuid4())
+        changed = db.execute(
+            update(Delivery)
+            .where(
+                Delivery.id == uuid.UUID(delivery_id),
+                _due(Delivery),
+                or_(
+                    Delivery.status == "pending",
+                    and_(Delivery.status == "sending", Delivery.lease_expires_at <= utcnow()),
+                ),
+            )
+            .values(
+                status="sending",
+                claim_token=token,
+                attempts=Delivery.attempts + 1,
+                lease_expires_at=utcnow() + timedelta(seconds=settings.WORK_LEASE_SECONDS),
+            )
+        ).rowcount
+        db.commit()
+        if changed != 1:
             return
-
-        payload = {
-            "run_id": str(run.id),
-            "status": run.status,
-            "composite_score": run.composite_score,
-            "scores_by_dimension": {
-                "adversarial": run.score_adversarial,
-                "tool_misuse": run.score_tool_misuse,
-                "hallucination": run.score_hallucination,
-                "recovery": run.score_recovery,
-                "latency": run.score_latency,
-                "cost": run.score_cost,
-            },
-            "run_url": f"https://lucenteval.dev/runs/{run.id}",
-        }
-        payload_bytes = json.dumps(payload).encode()
-
-        import hmac as _hmac
-        secret = hashlib.sha256(webhook.secret_hash.encode()).hexdigest()  # we stored hash; re-derive for signing
-        sig = "sha256=" + _hmac.new(webhook.secret_hash.encode(), payload_bytes, hashlib.sha256).hexdigest()
-
+        delivery = db.get(Delivery, uuid.UUID(delivery_id))
+        hook = db.get(Webhook, delivery.webhook_id)
+        status = "delivered"
         try:
-            with httpx.Client(timeout=30.0) as client:
-                resp = client.post(
-                    webhook.url,
-                    content=payload_bytes,
+            if not hook or not hook.is_active or not hook.secret_encrypted:
+                status = "cancelled"
+            elif delivery.attempts > settings.WEBHOOK_MAX_RETRIES + 1:
+                status = "failed"
+            else:
+                body = json.dumps({**delivery.payload, "event_id": delivery_id}, sort_keys=True).encode()
+                post_json(
+                    hook.url,
+                    body=body,
+                    timeout=30,
                     headers={
-                        "Content-Type": "application/json",
-                        "X-LucentEval-Signature": sig,
+                        "X-LucentEval-Signature": sign_webhook_payload(body, decrypt_secret(hook.secret_encrypted)),
+                        "X-LucentEval-Event-ID": delivery_id,
+                        "Idempotency-Key": delivery_id,
                     },
                 )
-                resp.raise_for_status()
-        except Exception as exc:
-            webhook.failure_count += 1
-            db.commit()
-            # Exponential backoff: 30s, 60s, 120s, 240s, 480s
-            countdown = 30 * (2 ** self.request.retries)
-            raise self.retry(exc=exc, countdown=countdown)
-
-        webhook.failure_count = 0
-        webhook.last_delivered_at = datetime.now(timezone.utc)
+        except Exception:
+            status = "failed" if delivery.attempts >= settings.WEBHOOK_MAX_RETRIES + 1 else "pending"
+        changed = db.execute(
+            update(Delivery)
+            .where(
+                Delivery.id == delivery.id,
+                Delivery.claim_token == token,
+                Delivery.lease_expires_at > utcnow(),
+            )
+            .execution_options(synchronize_session=False)
+            .values(
+                status=status,
+                claim_token=None,
+                lease_expires_at=None,
+                next_attempt_at=utcnow() + timedelta(seconds=30 * 2 ** (delivery.attempts - 1)),
+            )
+        ).rowcount
+        if changed and hook:
+            if status == "delivered":
+                hook.failure_count = 0
+                hook.last_delivered_at = utcnow()
+            elif status in ("pending", "failed"):
+                hook.failure_count += 1
         db.commit()
-
-    finally:
-        db.close()
-
-
-def _extract_text(raw_payload: dict) -> str:
-    try:
-        choices = raw_payload.get("choices", [])
-        if choices:
-            return choices[0].get("message", {}).get("content", "")
-        # Anthropic format
-        content = raw_payload.get("content", [])
-        if content and isinstance(content[0], dict):
-            return content[0].get("text", "")
-        return str(raw_payload)
-    except Exception:
-        return str(raw_payload)
-
-
-def _compute_cost(model: str, input_tokens: int | None, output_tokens: int | None) -> float | None:
-    """Compute cost in USD using a versioned rate table."""
-    if not input_tokens and not output_tokens:
-        return None
-
-    RATES = {
-        "gpt-4o": (2.50 / 1_000_000, 10.00 / 1_000_000),
-        "gpt-4o-mini": (0.15 / 1_000_000, 0.60 / 1_000_000),
-        "gpt-4-turbo": (10.00 / 1_000_000, 30.00 / 1_000_000),
-        "claude-opus-4": (15.00 / 1_000_000, 75.00 / 1_000_000),
-        "claude-sonnet-4": (3.00 / 1_000_000, 15.00 / 1_000_000),
-        "claude-haiku-4": (0.80 / 1_000_000, 4.00 / 1_000_000),
-        "default": (1.00 / 1_000_000, 3.00 / 1_000_000),
-    }
-
-    rates = RATES.get(model, RATES["default"])
-    in_cost = (input_tokens or 0) * rates[0]
-    out_cost = (output_tokens or 0) * rates[1]
-    return round(in_cost + out_cost, 8)

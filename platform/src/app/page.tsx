@@ -47,7 +47,7 @@ export default function HomePage() {
             className="text-base md:text-lg max-w-xl mx-auto leading-relaxed"
             style={{ color: "rgba(255,255,255,0.45)", letterSpacing: "-0.01em" }}
           >
-            Register your agent endpoint. Run against 500+ categorized adversarial prompts.
+            Register your agent endpoint. Run against the bundled adversarial corpus.
             Score across 6 dimensions. Land on the public leaderboard.
           </p>
         </div>
@@ -160,7 +160,7 @@ export default function HomePage() {
             {
               n: "02",
               title: "Run eval suite",
-              desc: "500+ adversarial prompts fire against your endpoint. Every response is captured atomically.",
+              desc: "The bundled prompt corpus runs against your endpoint. Every response is captured atomically.",
               color: "#0066FF",
             },
             {
@@ -209,10 +209,10 @@ export default function HomePage() {
           className="text-2xl font-bold"
           style={{ letterSpacing: "-0.03em", color: "rgba(255,255,255,0.93)" }}
         >
-          All scores are public. No private mode.
+          Completed scores are public. Raw traces belong to your account.
         </div>
         <p style={{ fontSize: "14px", color: "rgba(255,255,255,0.4)" }}>
-          Corpus versions are immutable. Weights are versioned. Historical scores never recomputed.
+          Run inputs are frozen. Scores use transparent heuristics and require careful interpretation.
         </p>
         <Link
           href="/dashboard/runs/new"

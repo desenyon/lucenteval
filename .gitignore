@@ -43,3 +43,5 @@ htmlcov/
 
 # Alembic
 alembic/versions/*.pyc
+
+*.tsbuildinfo

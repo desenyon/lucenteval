@@ -28,7 +28,7 @@ inputs:
   api_url:
     description: "Lucent Eval API base URL"
     required: false
-    default: "https://api.lucenteval.dev"
+    default: "http://localhost:8000"
   timeout_minutes:
     description: "Max minutes to wait for eval to complete"
     required: false
@@ -36,16 +36,22 @@ inputs:
 
 outputs:
   run_id:
+    value: ${{ steps.run_eval.outputs.run_id }}
     description: "The Lucent Eval run ID"
   composite_score:
+    value: ${{ steps.run_eval.outputs.composite_score }}
     description: "The composite score (0.0-1.0)"
   score_adversarial:
+    value: ${{ steps.run_eval.outputs.score_adversarial }}
     description: "Adversarial score"
   score_hallucination:
+    value: ${{ steps.run_eval.outputs.score_hallucination }}
     description: "Hallucination score"
   score_latency:
+    value: ${{ steps.run_eval.outputs.score_latency }}
     description: "Latency score"
   run_url:
+    value: ${{ steps.run_eval.outputs.run_url }}
     description: "URL to view full results"
 
 runs:
@@ -68,10 +74,11 @@ runs:
 
         echo "🚀 Submitting eval run to Lucent Eval..."
 
-        HEADERS="{}"
-        if [ -n "$AUTH_HEADER" ]; then
-          HEADERS="{\"Authorization\": \"$AUTH_HEADER\"}"
+        if ! [[ "$TIMEOUT_MINUTES" =~ ^[1-9][0-9]*$ ]] || [ "$TIMEOUT_MINUTES" -gt 1440 ]; then
+          echo "timeout_minutes must be an integer from 1 to 1440"; exit 1
         fi
+        jq -en --arg score "$MIN_SCORE" '$score | tonumber | . >= 0 and . <= 1' >/dev/null
+        HEADERS=$(jq -cn --arg auth "$AUTH_HEADER" 'if $auth == "" then {} else {Authorization: $auth} end')
 
         CREATE_BODY=$(jq -n \
           --arg url "$ENDPOINT_URL" \
@@ -80,26 +87,29 @@ runs:
           --arg cv "$CORPUS_VERSION" \
           '{endpoint_url: $url, headers: $headers, system_prompt: (if $sys == "" then null else $sys end), corpus_version: $cv}')
 
-        RUN_RESP=$(curl -sf \
+        SUBMISSION_KEY="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}-${RANDOM}"
+        RUN_RESP=$(curl --connect-timeout 10 --max-time 60 -sf \
           -X POST "$API_URL/v1/runs" \
+          -H "Idempotency-Key: $SUBMISSION_KEY" \
           -H "Authorization: Bearer $LUCENT_API_KEY" \
           -H "Content-Type: application/json" \
           -d "$CREATE_BODY")
 
-        RUN_ID=$(echo "$RUN_RESP" | jq -r '.id')
+        RUN_ID=$(echo "$RUN_RESP" | jq -er '.id | select(type == "string")')
         echo "📋 Run ID: $RUN_ID"
         echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
 
         # Poll until complete
         TIMEOUT=$((TIMEOUT_MINUTES * 60))
         ELAPSED=0
+        STATUS=pending
         POLL_INTERVAL=15
 
         while [ $ELAPSED -lt $TIMEOUT ]; do
           sleep $POLL_INTERVAL
           ELAPSED=$((ELAPSED + POLL_INTERVAL))
 
-          RUN_DATA=$(curl -sf \
+          RUN_DATA=$(curl --connect-timeout 10 --max-time 30 -sf \
             "$API_URL/v1/runs/$RUN_ID" \
             -H "Authorization: Bearer $LUCENT_API_KEY")
 
@@ -123,7 +133,7 @@ runs:
         ADV=$(echo "$RUN_DATA" | jq -r '.score_adversarial // "null"')
         HALL=$(echo "$RUN_DATA" | jq -r '.score_hallucination // "null"')
         LAT=$(echo "$RUN_DATA" | jq -r '.score_latency // "null"')
-        RUN_URL="$API_URL/runs/$RUN_ID"
+        RUN_URL="$API_URL/v1/runs/$RUN_ID"
 
         echo "composite_score=$COMPOSITE" >> "$GITHUB_OUTPUT"
         echo "score_adversarial=$ADV" >> "$GITHUB_OUTPUT"
@@ -142,7 +152,7 @@ runs:
         echo ""
 
         # Fail CI if below threshold
-        PASS=$(echo "$COMPOSITE $MIN_SCORE" | awk '{print ($1 >= $2) ? "true" : "false"}')
+        PASS=$(jq -n --arg score "$COMPOSITE" --arg min "$MIN_SCORE" '($score | tonumber) >= ($min | tonumber)')
         if [ "$PASS" = "false" ]; then
           echo "❌ Composite score $COMPOSITE is below minimum threshold $MIN_SCORE"
           exit 1

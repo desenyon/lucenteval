@@ -1,6 +1,6 @@
 """Composite scorer: weighted average across all 6 dimensions."""
-from typing import Any
 
+from typing import Any
 
 DEFAULT_WEIGHTS_V1 = {
     "adversarial": 0.25,

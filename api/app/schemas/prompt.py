@@ -1,9 +1,12 @@
 import uuid
 from datetime import datetime
 from typing import Literal
+
 from pydantic import BaseModel
 
-PromptCategory = Literal["injection", "jailbreak", "role_confusion", "goal_hijack", "tool_abuse", "factual_trap", "multi_turn_trap"]
+PromptCategory = Literal[
+    "injection", "jailbreak", "role_confusion", "goal_hijack", "tool_abuse", "factual_trap", "multi_turn_trap"
+]
 PromptSeverity = Literal["low", "medium", "high", "critical"]
 
 

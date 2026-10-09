@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import toast from "react-hot-toast";
 
 const WEIGHTS = [
@@ -12,6 +13,7 @@ const WEIGHTS = [
 ];
 
 export default function SettingsPage() {
+  const queryClient = useQueryClient();
   const [apiKey, setApiKey] = useState("");
   const [saved, setSaved] = useState(false);
 
@@ -22,6 +24,7 @@ export default function SettingsPage() {
 
   const handleSave = () => {
     localStorage.setItem("lucent_api_key", apiKey);
+    queryClient.clear();
     setSaved(true);
     toast.success("API key saved", {
       style: { background: "#0B0B0B", border: "1px solid rgba(214,255,0,0.2)", color: "#D6FF00" },
@@ -42,7 +45,7 @@ export default function SettingsPage() {
         <div>
           <span className="label block mb-1">API Key</span>
           <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.3)", lineHeight: 1.5 }}>
-            Stored only in your browser&apos;s localStorage. Never sent to Lucent Eval servers.
+            Stored in this browser&apos;s localStorage and sent to the configured Lucent Eval API as a Bearer token. Clear it on shared devices.
           </p>
         </div>
         <div style={{ display: "flex", gap: "10px" }}>
@@ -57,9 +60,10 @@ export default function SettingsPage() {
           <button onClick={handleSave} className="btn-primary flex-shrink-0">
             Save
           </button>
+          <button className="btn-secondary" onClick={() => { localStorage.removeItem("lucent_api_key"); queryClient.clear(); setApiKey(""); setSaved(false); }}>Clear</button>
         </div>
         {saved && (
-          <p style={{ fontSize: "11px", color: "#D6FF00" }}>✓ Key saved for this session</p>
+          <p style={{ fontSize: "11px", color: "#D6FF00" }}>✓ Key saved in this browser</p>
         )}
       </div>
 
@@ -114,7 +118,7 @@ export default function SettingsPage() {
         }}
       >
         <p style={{ fontSize: "12px", color: "rgba(0,102,255,0.9)", lineHeight: 1.6 }}>
-          Corpus versions are immutable after release. Runs always reference a frozen corpus version — not live head.
+          Each new run stores a frozen copy of its selected prompts and scoring configuration.
         </p>
       </div>
     </div>

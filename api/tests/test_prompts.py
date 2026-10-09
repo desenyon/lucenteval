@@ -1,7 +1,9 @@
+import uuid
+
 import pytest
 from sqlalchemy import insert
+
 from app.models.prompt import Prompt
-import uuid
 
 
 async def _seed_prompts(db_session, n=5):

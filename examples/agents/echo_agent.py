@@ -10,8 +10,8 @@ Run:
     uvicorn echo_agent:app --port 8080
 
 Register with LucentEval:
-    curl -X POST http://localhost:8000/api/v1/runs \
-      -H "X-API-Key: lev_your_key" \
+    curl -X POST http://localhost:8000/v1/runs \
+      -H "Authorization: Bearer $LUCENT_API_KEY" \
       -H "Content-Type: application/json" \
       -d '{"endpoint_url":"http://host.docker.internal:8080/v1/chat/completions"}'
 """

@@ -1,71 +1,15 @@
-# Quickstart Guide
+# Quickstart
 
-Get your first eval run in 5 minutes.
-
-## 1. Create an account
+The maintained setup, account bootstrap, agent protocol and curl examples are in the [README](../README.md#quick-start-local-docker-demo).
 
 ```bash
-curl -X POST https://api.lucenteval.dev/v1/accounts \
-  -H "Content-Type: application/json" \
-  -d '{"email": "you@example.com"}'
+python3 infra/scripts/init_env.py
+docker compose --profile demo up -d --build --wait
+docker compose exec -T api python /workspace/infra/scripts/smoke_eval.py
 ```
 
-## 2. Create an API key
+No model credentials are needed. Use `/v1` routes with `Authorization: Bearer lev_…`. The mock runs inside Docker at `http://mock-agent:8080/v1/chat/completions`; it is explicitly allowlisted by the demo configuration. Real destinations require public HTTPS unless an operator permits an exact private host.
 
-```bash
-curl -X POST https://api.lucenteval.dev/v1/keys \
-  -H "Authorization: Bearer <your_key>" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "My First Key", "scopes": ["run:create", "run:read", "prompt:read"]}'
-```
+Dashboard: http://localhost:3000. Live API reference: http://localhost:8000/redoc. Register through `POST /v1/accounts` to receive your own initial key once, then paste it in Dashboard → Settings. The automated smoke account's key is intentionally not printed.
 
-Save the `raw_key` — it's shown once.
-
-## 3. Submit your agent
-
-Your agent must expose an OpenAI-compatible chat completions endpoint:
-
-```
-POST https://your-agent.example.com/v1/chat/completions
-{
-  "messages": [{"role": "user", "content": "...adversarial prompt..."}]
-}
-```
-
-## 4. Create a run
-
-```bash
-curl -X POST https://api.lucenteval.dev/v1/runs \
-  -H "Authorization: Bearer lev_yourkeyhere" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "endpoint_url": "https://your-agent.example.com/v1/chat/completions",
-    "headers": {"Authorization": "Bearer your-agent-key"},
-    "corpus_version": "v1"
-  }'
-```
-
-Returns `{ "id": "run_uuid", "status": "pending", ... }`.
-
-## 5. Poll for results
-
-```bash
-curl https://api.lucenteval.dev/v1/runs/<run_id> \
-  -H "Authorization: Bearer lev_yourkeyhere"
-```
-
-Once `status == "completed"`, you'll see all 6 dimension scores.
-
-## 6. View on the leaderboard
-
-Visit [lucenteval.dev/leaderboard](https://lucenteval.dev/leaderboard) to see where your agent ranks.
-
-## 7. Add to CI (optional)
-
-```yaml
-- uses: lucent-eval/run-action@v1
-  with:
-    api_key: ${{ secrets.LUCENT_API_KEY }}
-    endpoint_url: ${{ secrets.AGENT_ENDPOINT }}
-    min_composite_score: "0.75"
-```
+See the README migration section before upgrading an existing installation. The setup script preserves existing `.env` files and existing Docker volumes.

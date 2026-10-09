@@ -1,211 +1,133 @@
-version: "3.9"
+x-app-env: &app-env
+  DATABASE_URL: postgresql+asyncpg://lucent:lucent@postgres:5432/lucenteval
+  DATABASE_URL_SYNC: postgresql+psycopg2://lucent:lucent@postgres:5432/lucenteval
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  S3_ENDPOINT_URL: http://minio:9000
+
+x-worker: &worker
+  image: lucenteval-api:local
+  env_file: .env
+  environment: *app-env
+  depends_on:
+    api:
+      condition: service_healthy
+  restart: unless-stopped
 
 services:
-  # ── Data layer ──────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: lucent
       POSTGRES_PASSWORD: lucent
       POSTGRES_DB: lucenteval
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+    ports: ["127.0.0.1:${POSTGRES_PORT:-5432}:5432"]
+    volumes: [postgres_data:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lucent -d lucenteval"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
+      interval: 3s
+      timeout: 3s
+      retries: 20
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    ports: ["127.0.0.1:${REDIS_PORT:-6379}:6379"]
+    command: redis-server --appendonly yes
+    volumes: [redis_data:/data]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      interval: 3s
       timeout: 3s
-      retries: 10
-
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  clickhouse:
-    image: clickhouse/clickhouse-server:24-alpine
-    ports:
-      - "8123:8123"
-      - "9002:9000"
-    volumes:
-      - clickhouse_data:/var/lib/clickhouse
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8123/ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  # ── API service ──────────────────────────────────────────────────────────────
+      retries: 20
   api:
+    image: lucenteval-api:local
     build:
-      context: ./api
-      dockerfile: Dockerfile
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://lucent:lucent@postgres:5432/lucenteval
-      DATABASE_URL_SYNC: postgresql+psycopg2://lucent:lucent@postgres:5432/lucenteval
-      REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
-      S3_ENDPOINT_URL: http://minio:9000
-      CLICKHOUSE_HOST: clickhouse
-    ports:
-      - "8000:8000"
+      context: .
+      dockerfile: api/Dockerfile
+    env_file: .env
+    environment: *app-env
+    ports: ["127.0.0.1:${API_PORT:-8000}:8000"]
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
-        condition: service_healthy
-    command: >
-      sh -c "alembic upgrade head &&
-             python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4"
+    command: sh -c 'alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000'
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health"]
-      interval: 15s
+      test: ["CMD", "curl", "--fail", "http://localhost:8000/v1/health"]
+      interval: 5s
       timeout: 5s
-      retries: 5
-
-  # ── Celery runner worker ─────────────────────────────────────────────────────
+      retries: 20
   worker-runner:
-    build:
-      context: ./api
-      dockerfile: Dockerfile
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://lucent:lucent@postgres:5432/lucenteval
-      DATABASE_URL_SYNC: postgresql+psycopg2://lucent:lucent@postgres:5432/lucenteval
-      REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
-      S3_ENDPOINT_URL: http://minio:9000
-      CLICKHOUSE_HOST: clickhouse
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    command: celery -A app.workers.celery_app worker -Q runner -c 4 --loglevel=info
-    healthcheck:
-      test: ["CMD", "celery", "-A", "app.workers.celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # ── Celery scorer worker ─────────────────────────────────────────────────────
+    <<: *worker
+    command: celery -A app.workers.celery_app worker -Q runner -c 2 --loglevel=info
   worker-scorer:
-    build:
-      context: ./api
-      dockerfile: Dockerfile
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://lucent:lucent@postgres:5432/lucenteval
-      DATABASE_URL_SYNC: postgresql+psycopg2://lucent:lucent@postgres:5432/lucenteval
-      REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
-      S3_ENDPOINT_URL: http://minio:9000
-      CLICKHOUSE_HOST: clickhouse
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    command: celery -A app.workers.celery_app worker -Q scorer -c 8 --loglevel=info
-
-  # ── Celery webhook worker ────────────────────────────────────────────────────
+    <<: *worker
+    command: celery -A app.workers.celery_app worker -Q scorer -c 2 --loglevel=info
   worker-webhook:
-    build:
-      context: ./api
-      dockerfile: Dockerfile
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://lucent:lucent@postgres:5432/lucenteval
-      DATABASE_URL_SYNC: postgresql+psycopg2://lucent:lucent@postgres:5432/lucenteval
-      REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
-      S3_ENDPOINT_URL: http://minio:9000
-    depends_on:
-      redis:
-        condition: service_healthy
-    command: celery -A app.workers.celery_app worker -Q webhook -c 4 --loglevel=info
-
-  # ── Celery beat (scheduled tasks) ────────────────────────────────────────────
+    <<: *worker
+    command: celery -A app.workers.celery_app worker -Q webhook -c 1 --loglevel=info
   celery-beat:
-    build:
-      context: ./api
-      dockerfile: Dockerfile
-    env_file:
-      - .env
-    environment:
-      CELERY_BROKER_URL: redis://redis:6379/1
-    depends_on:
-      redis:
-        condition: service_healthy
-    command: celery -A app.workers.celery_app beat --loglevel=info
-
-  # ── Platform (Next.js) ───────────────────────────────────────────────────────
+    <<: *worker
+    command: celery -A app.workers.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
   platform:
     build:
       context: ./platform
-      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
       API_URL: http://api:8000
-    ports:
-      - "3000:3000"
+    ports: ["127.0.0.1:${PLATFORM_PORT:-3000}:3000"]
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
-      interval: 15s
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
       timeout: 5s
-      retries: 5
-
-  # ── MinIO bucket setup ───────────────────────────────────────────────────────
+      retries: 15
+  mock-agent:
+    image: lucenteval-api:local
+    profiles: [demo]
+    command: uvicorn examples.agents.mock_agent:app --host 0.0.0.0 --port 8080
+    environment:
+      MOCK_WEBHOOK_SECRET: ${MOCK_WEBHOOK_SECRET:-}
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+  minio:
+    image: minio/minio:latest
+    profiles: [archive]
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
+    volumes: [minio_data:/data]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
   minio-setup:
     image: minio/mc:latest
+    profiles: [archive]
     depends_on:
       minio:
         condition: service_healthy
     entrypoint: >
-      sh -c "
-        mc alias set local http://minio:9000 minioadmin minioadmin &&
-        mc mb -p local/lucenteval-responses &&
-        mc anonymous set download local/lucenteval-responses || true
-      "
-    restart: "no"
+      sh -c 'mc alias set local http://minio:9000 minioadmin minioadmin &&
+             mc mb --ignore-existing local/lucenteval-responses &&
+             mc anonymous set none local/lucenteval-responses'
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    profiles: [analytics]
+    volumes: [clickhouse_data:/var/lib/clickhouse]
 
 volumes:
   postgres_data:
+  redis_data:
   minio_data:
   clickhouse_data:

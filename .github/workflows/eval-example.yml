@@ -1,10 +1,10 @@
 name: Lucent Eval Gate
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   eval:
@@ -17,6 +17,7 @@ jobs:
         id: eval
         uses: ./.github/actions/run-eval
         with:
+          api_url: ${{ vars.LUCENT_API_URL }}
           api_key: ${{ secrets.LUCENT_API_KEY }}
           endpoint_url: ${{ secrets.AGENT_ENDPOINT_URL }}
           auth_header: ${{ secrets.AGENT_AUTH_HEADER }}

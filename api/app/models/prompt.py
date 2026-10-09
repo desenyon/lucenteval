@@ -1,8 +1,10 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, DateTime, Text, Integer, CheckConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+
+from sqlalchemy import CheckConstraint, DateTime, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
 from ..core.database import Base
 from ..core.security import utcnow
 

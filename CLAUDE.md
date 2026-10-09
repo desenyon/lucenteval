@@ -1,5 +1,7 @@
 # CLAUDE.md — Lucent Eval
 
+> Historical product roadmap. Many milestone statements below are aspirations, not implemented guarantees. Use README.md and docs/RUNBOOK.md for current routes, authentication, encrypted credential handling, worker durability and verified limitations. No calibration or throughput certification is established by the repository.
+
 > Public platform for developers to test AI agents against adversarial prompts,
 > tool misuse, hallucination, latency, cost, and recovery behavior.
 

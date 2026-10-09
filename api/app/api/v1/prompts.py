@@ -1,11 +1,13 @@
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
-from ...core.database import get_db
-from ...core.auth import require_scope
-from ...models.prompt import Prompt
-from ...schemas.prompt import PromptRead, PromptContribute
 import uuid
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ...core.auth import require_scope
+from ...core.database import get_db
+from ...models.prompt import Prompt
+from ...schemas.prompt import PromptContribute, PromptRead
 
 router = APIRouter(prefix="/prompts", tags=["prompts"])
 
@@ -21,7 +23,7 @@ async def list_prompts(
     auth=Depends(require_scope("prompt:read")),
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(Prompt).where(Prompt.is_active == True, Prompt.in_quarantine == False)
+    q = select(Prompt).where(Prompt.is_active.is_(True), Prompt.in_quarantine.is_(False))
     if category:
         q = q.where(Prompt.category == category)
     if subcategory:
@@ -31,7 +33,7 @@ async def list_prompts(
     if version:
         q = q.where(Prompt.corpus_version == version)
 
-    q = q.offset((page - 1) * page_size).limit(page_size)
+    q = q.order_by(Prompt.id).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(q)
     return result.scalars().all()
 
@@ -43,7 +45,10 @@ async def get_prompt(
     db: AsyncSession = Depends(get_db),
 ):
     from fastapi import HTTPException
-    result = await db.execute(select(Prompt).where(Prompt.id == prompt_id))
+
+    result = await db.execute(
+        select(Prompt).where(Prompt.id == prompt_id, Prompt.is_active.is_(True), Prompt.in_quarantine.is_(False))
+    )
     prompt = result.scalar_one_or_none()
     if not prompt:
         raise HTTPException(status_code=404, detail="Prompt not found")
@@ -79,7 +84,10 @@ async def upvote_prompt(
     db: AsyncSession = Depends(get_db),
 ):
     from fastapi import HTTPException
-    result = await db.execute(select(Prompt).where(Prompt.id == prompt_id))
+
+    result = await db.execute(
+        select(Prompt).where(Prompt.id == prompt_id, Prompt.is_active.is_(True), Prompt.in_quarantine.is_(False))
+    )
     prompt = result.scalar_one_or_none()
     if not prompt:
         raise HTTPException(status_code=404, detail="Prompt not found")

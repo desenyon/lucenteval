@@ -1,4 +1,5 @@
 from celery import Celery
+
 from ..core.config import get_settings
 
 settings = get_settings()
@@ -28,9 +29,15 @@ celery_app.conf.update(
         "scorer": {"exchange": "scorer", "routing_key": "scorer"},
         "webhook": {"exchange": "webhook", "routing_key": "webhook"},
     },
-    # Dead-letter queue config
-    task_annotations={
-        "app.workers.tasks.run_prompt": {"max_retries": 3, "default_retry_delay": 30},
-        "app.workers.tasks.deliver_webhook": {"max_retries": 5},
+    worker_prefetch_multiplier=1,
+    task_publish_retry=False,
+    broker_connection_timeout=3,
+    task_ignore_result=True,
+    beat_schedule={
+        "reconcile-durable-work": {
+            "task": "app.workers.tasks.reconcile_work",
+            "schedule": 30.0,
+            "options": {"queue": "runner"},
+        },
     },
 )

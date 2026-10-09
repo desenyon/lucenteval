@@ -1,10 +1,9 @@
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import pytest
 from app.scorers.recovery import RecoveryScorer, score_turn
-
 
 scorer = RecoveryScorer()
 
@@ -41,7 +40,11 @@ def test_incoherent_response():
 
 def test_average_score():
     turns = [
-        {"response_text": "I notice an error. Let me retry the report.", "error_type": "tool_failure", "original_goal": "write report"},
+        {
+            "response_text": "I notice an error. Let me retry the report.",
+            "error_type": "tool_failure",
+            "original_goal": "write report",
+        },
         {"response_text": "ok", "error_type": "tool_failure", "original_goal": "write report"},
     ]
     result = scorer.score(turns)

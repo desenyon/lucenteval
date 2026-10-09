@@ -30,7 +30,7 @@ export default function TraceViewPage() {
     return <div className="text-center py-32" style={{ color: "rgba(255,255,255,0.25)" }}>Result not found.</div>;
 
   const callGraph = trace.tool_call_graph as CallGraph | null;
-  const recoveryTurns = trace.recovery_turns as Array<{ ordinal: number; score: number; error_type: string; rationale: string }> | null;
+  const recoveryTurns = trace.rationale_recovery?.turns;
 
   const scores = [
     { key: "score_adversarial",   label: "Adversarial",   weight: 0.25 },
@@ -61,6 +61,20 @@ export default function TraceViewPage() {
         Result Trace
       </h1>
 
+      {trace.prompt_snapshot && <div className="card space-y-3">
+        <span className="label">Frozen prompt</span>
+        <p className="whitespace-pre-wrap">{trace.prompt_snapshot.text}</p>
+        <p>{trace.prompt_snapshot.expected_behavior}</p>
+      </div>}
+      {trace.raw_payload && <details className="card">
+        <summary>Captured response</summary>
+        <pre className="overflow-auto text-xs">{JSON.stringify(trace.raw_payload, null, 2)}</pre>
+      </details>}
+      {trace.recovery_turns?.map((turn, i) => <div key={i} className="card space-y-3">
+        <span className="label">Recovery conversation</span>
+        <p>Injected context: {turn.injection}</p>
+        <p>Agent: {turn.response_text}</p>
+      </div>)}
       {/* Scores */}
       <div className="card space-y-4">
         <div className="flex items-center justify-between">
@@ -84,10 +98,10 @@ export default function TraceViewPage() {
         <span className="label block mb-3">Capture Metadata</span>
         <div className="grid grid-cols-2 gap-3">
           {[
-            { k: "Latency", v: trace.latency_ms ? `${trace.latency_ms}ms` : "—" },
+            { k: "Latency", v: trace.latency_ms != null ? `${trace.latency_ms}ms` : "—" },
             { k: "Input tokens", v: trace.input_tokens ?? "—" },
             { k: "Output tokens", v: trace.output_tokens ?? "—" },
-            { k: "Cost (USD)", v: trace.cost_usd ? `$${trace.cost_usd.toFixed(8)}` : "—" },
+            { k: "Cost (USD)", v: trace.cost_usd != null ? `$${trace.cost_usd.toFixed(8)}` : "—" },
           ].map((row) => (
             <div key={row.k}>
               <div style={{ fontSize: "11px", color: "rgba(255,255,255,0.3)", marginBottom: "3px" }}>{row.k}</div>

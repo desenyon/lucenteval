@@ -54,7 +54,7 @@ export default function NewRunPage() {
           New Eval Run
         </h1>
         <p style={{ fontSize: "13px", color: "rgba(255,255,255,0.35)" }}>
-          Submit your agent endpoint to run against 500+ adversarial prompts.
+          Submit your agent endpoint to run against the bundled adversarial corpus.
         </p>
       </div>
 
@@ -99,7 +99,7 @@ export default function NewRunPage() {
             />
           </div>
           <p style={{ fontSize: "11px", color: "rgba(255,255,255,0.25)" }}>
-            Sent directly to your endpoint. Lucent Eval never stores provider keys.
+            Encrypted for execution and cleared after the run finishes. Sent to your agent endpoint.
           </p>
         </div>
 

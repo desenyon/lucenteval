@@ -102,8 +102,7 @@ export default function LeaderboardPage() {
                   {(page - 1) * 50 + i + 1}
                 </td>
                 <td>
-                  <a
-                    href={`/dashboard/runs/${run.id}`}
+                  <span
                     style={{
                       fontSize: "12px",
                       fontWeight: 500,
@@ -117,7 +116,7 @@ export default function LeaderboardPage() {
                     }}
                   >
                     {run.endpoint_url.replace(/^https?:\/\//, "").slice(0, 36)}
-                  </a>
+                  </span>
                   <span style={{ fontSize: "10px", color: "rgba(255,255,255,0.2)", fontFamily: "monospace" }}>
                     {run.corpus_version}
                   </span>

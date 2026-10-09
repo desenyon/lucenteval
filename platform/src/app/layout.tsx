@@ -1,24 +1,18 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import "@fontsource-variable/inter";
 import "./globals.css";
 import { Providers } from "@/components/Providers";
 import { Navigation } from "@/components/Navigation";
 
-const inter = Inter({
-  subsets: ["latin"],
-  variable: "--font-inter",
-  display: "swap",
-});
-
 export const metadata: Metadata = {
   title: "Lucent Eval — AI Agent Adversarial Testing",
   description:
-    "Benchmark your AI agents against 500+ adversarial prompts across 6 dimensions. Public leaderboard.",
+    "Benchmark your AI agents against the bundled adversarial corpus across 6 dimensions. Public leaderboard.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${inter.variable} h-full`}>
+    <html lang="en" className="h-full">
       <body className="h-full bg-oled-base text-white font-sans">
         <Providers>
           <div className="relative z-10 min-h-screen flex flex-col">

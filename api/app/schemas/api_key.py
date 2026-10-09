@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime
 from typing import Literal
-from pydantic import BaseModel
+
+from pydantic import BaseModel, Field
 
 KeyScope = Literal["run:create", "run:read", "prompt:read"]
 
@@ -9,7 +10,7 @@ KeyScope = Literal["run:create", "run:read", "prompt:read"]
 class ApiKeyCreate(BaseModel):
     name: str | None = None
     scopes: list[KeyScope] = ["run:create", "run:read", "prompt:read"]
-    rate_limit_rpm: int = 60
+    rate_limit_rpm: int = Field(60, ge=1, le=10000)
 
 
 class ApiKeyRead(BaseModel):

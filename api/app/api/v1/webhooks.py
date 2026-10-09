@@ -1,13 +1,16 @@
-import uuid
 import hashlib
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
-from ...core.database import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from ...core.auth import get_current_account
-from ...core.security import generate_webhook_secret, utcnow
+from ...core.credentials import encrypt_secret
+from ...core.database import get_db
+from ...core.security import generate_webhook_secret
 from ...models.webhook import Webhook
-from ...schemas.webhook import WebhookCreate, WebhookRead, WebhookCreateResponse
+from ...schemas.webhook import WebhookCreate, WebhookCreateResponse, WebhookRead
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -22,10 +25,16 @@ async def create_webhook(
     secret = generate_webhook_secret()
     secret_hash = hashlib.sha256(secret.encode()).hexdigest()
 
+    try:
+        encrypted = encrypt_secret(secret)
+    except ValueError:
+        raise HTTPException(503, "Credential encryption is not configured") from None
+
     webhook = Webhook(
         account_id=account.id,
         url=body.url,
         secret_hash=secret_hash,
+        secret_encrypted=encrypted,
         description=body.description,
     )
     db.add(webhook)
@@ -57,9 +66,7 @@ async def delete_webhook(
     db: AsyncSession = Depends(get_db),
 ):
     account, _ = auth
-    result = await db.execute(
-        select(Webhook).where(Webhook.id == webhook_id, Webhook.account_id == account.id)
-    )
+    result = await db.execute(select(Webhook).where(Webhook.id == webhook_id, Webhook.account_id == account.id))
     webhook = result.scalar_one_or_none()
     if not webhook:
         raise HTTPException(status_code=404, detail="Webhook not found")

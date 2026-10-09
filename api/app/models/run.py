@@ -1,8 +1,11 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, DateTime, Text, ForeignKey, Float, Integer, JSON
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from typing import TYPE_CHECKING
+
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from ..core.database import Base
 from ..core.security import utcnow
 
@@ -11,12 +14,24 @@ class Run(Base):
     __tablename__ = "runs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("accounts.id"), nullable=False, index=True)
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id"), nullable=False, index=True
+    )
     endpoint_url: Mapped[str] = mapped_column(Text, nullable=False)
     headers: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     system_prompt: Mapped[str | None] = mapped_column(Text)
     corpus_version: Mapped[str] = mapped_column(String(32), nullable=False, default="v1")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+
+    headers_encrypted: Mapped[str | None] = mapped_column(Text)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128))
+    request_hash: Mapped[str | None] = mapped_column(String(64))
+    manifest_sha256: Mapped[str | None] = mapped_column(String(64))
+    scorer_version: Mapped[str] = mapped_column(String(32), default="v2", nullable=False)
+    rates_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    __table_args__ = (UniqueConstraint("account_id", "idempotency_key", name="uq_run_idempotency"),)
 
     # Composite score (0.0-1.0), set after all prompts scored
     composite_score: Mapped[float | None] = mapped_column(Float)
@@ -46,3 +61,8 @@ class Run(Base):
 
     account: Mapped["Account"] = relationship("Account", back_populates="runs")
     results: Mapped[list["Result"]] = relationship("Result", back_populates="run", cascade="all, delete-orphan")
+
+
+if TYPE_CHECKING:
+    from .account import Account
+    from .result import Result

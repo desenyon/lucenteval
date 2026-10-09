@@ -1,4 +1,6 @@
 "use client";
+import { useState } from "react";
+import toast from "react-hot-toast";
 import { useParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { runsApi, type Run, type Result } from "@/lib/api";
@@ -25,18 +27,20 @@ const DIM_LABELS: Record<string, string> = {
 };
 
 export default function RunDetailPage() {
+  const [page, setPage] = useState(1);
   const { id } = useParams<{ id: string }>();
 
   const { data: run, isLoading } = useQuery({
     queryKey: ["run", id],
     queryFn: () => runsApi.get(id),
-    refetchInterval: (data: unknown) => ((data as Run | undefined)?.status === "running" ? 3000 : false),
+    refetchInterval: (query) => ["pending", "running"].includes(query.state.data?.status ?? "") ? 3000 : false,
   });
 
   const { data: results } = useQuery({
-    queryKey: ["run-results", id],
-    queryFn: () => runsApi.results(id),
-    enabled: run?.status === "completed",
+    queryKey: ["run-results", id, page, run?.status],
+    queryFn: () => runsApi.results(id, page),
+    enabled: !!run,
+    refetchInterval: ["pending", "running"].includes(run?.status ?? "") ? 3000 : false,
   });
 
   if (isLoading)
@@ -108,14 +112,23 @@ export default function RunDetailPage() {
             {run.endpoint_url}
           </p>
         </div>
-        <a
-          href={`/api/v1/runs/${id}/export`}
+        <button
+          onClick={async () => {
+            try {
+              const blob = await runsApi.export(id);
+              const url = URL.createObjectURL(blob);
+              const link = document.createElement("a");
+              link.href = url;
+              link.download = `run_${id}.ndjson`;
+              link.click();
+              setTimeout(() => URL.revokeObjectURL(url), 1000);
+            } catch { toast.error("Export failed. Check your API key and try again."); }
+          }}
           className="btn-secondary flex-shrink-0"
           style={{ fontSize: "12px" }}
-          download
         >
           Export NDJSON
-        </a>
+        </button>
       </div>
 
       {/* Score cards */}
@@ -132,7 +145,7 @@ export default function RunDetailPage() {
                 key={key}
                 score={(run as unknown as Record<string, number | null>)[key]}
                 label={label}
-                weight={WEIGHTS[key]}
+                weight={run.weights_snapshot[key.replace("score_", "")] ?? WEIGHTS[key]}
               />
             ))}
           </div>
@@ -144,6 +157,9 @@ export default function RunDetailPage() {
           <dl className="space-y-3">
             {[
               { k: "Corpus", v: run.corpus_version },
+              { k: "Status", v: run.status },
+              { k: "Failed prompts", v: run.failed_count },
+              { k: "Scorer", v: run.scorer_version },
               { k: "Prompts", v: `${run.completed_count} / ${run.prompt_count}` },
               { k: "p50", v: run.latency_p50 ? `${run.latency_p50}ms` : "—" },
               { k: "p95", v: run.latency_p95 ? `${run.latency_p95}ms` : "—" },
@@ -255,6 +271,11 @@ export default function RunDetailPage() {
           </table>
         </div>
       )}
+      <div className="flex justify-center gap-3">
+        <button className="btn-secondary" disabled={page === 1} onClick={() => setPage(page - 1)}>Previous</button>
+        <span>Results page {page}</span>
+        <button className="btn-secondary" disabled={(results?.length ?? 0) < 50} onClick={() => setPage(page + 1)}>Next</button>
+      </div>
     </div>
   );
 }

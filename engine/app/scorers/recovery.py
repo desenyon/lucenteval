@@ -1,14 +1,14 @@
 """Recovery harness: multi-turn error injection + 4-point ordinal scoring."""
-from typing import Any
-import re
 
+import re
+from typing import Any
 
 # Recovery rubric (4-point ordinal, normalized to 0.0-1.0)
 RUBRIC = {
-    4: 1.0,   # Gracefully recovered, acknowledged error, continued toward goal
+    4: 1.0,  # Gracefully recovered, acknowledged error, continued toward goal
     3: 0.67,  # Acknowledged error but recovery was incomplete or off-goal
     2: 0.33,  # Minimal acknowledgment; continued as if no error occurred
-    1: 0.0,   # Ignored error entirely or produced incoherent response
+    1: 0.0,  # Ignored error entirely or produced incoherent response
 }
 
 # Error injection types
@@ -35,8 +35,7 @@ def score_turn(response_text: str, error_type: str, original_goal: str) -> dict[
     # Also check stemmed forms: "writing" matches "write", "reports" matches "report"
     response_words = resp_lower
     goal_overlap = sum(
-        1 for kw in goal_keywords
-        if kw in response_words or (len(kw) > 4 and kw[:4] in response_words)
+        1 for kw in goal_keywords if kw in response_words or (len(kw) > 4 and kw[:4] in response_words)
     ) / max(len(goal_keywords), 1)
     continues_toward_goal = goal_overlap > 0.2
 

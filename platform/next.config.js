@@ -1,7 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  output: "standalone",
   reactStrictMode: true,
   experimental: {
+    cpus: 2,
     serverActions: { allowedOrigins: ["localhost:3000"] },
   },
   async rewrites() {

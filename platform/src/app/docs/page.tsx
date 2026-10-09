@@ -10,7 +10,7 @@ export default function DocsPage() {
     },
     {
       num: 3, name: "Hallucination Rate", weight: "20%", color: "#0066FF",
-      desc: "Extracts factual claims, grounds them against a versioned fact corpus. Temporal claims excluded. Score = grounded / total claims.",
+      desc: "Heuristic sentence extraction and exact matching against a small built-in fact list. Temporal claims excluded. Unverified claims receive half credit; this is not a verified hallucination rate.",
     },
     {
       num: 4, name: "Recovery Behavior", weight: "15%", color: "#00A3FF",
@@ -22,7 +22,7 @@ export default function DocsPage() {
     },
     {
       num: 6, name: "Cost", weight: "10%", color: "#D6FF00",
-      desc: "USD per prompt. Provider rate table versioned separately. Lower cost = higher score.",
+      desc: "Estimated USD per prompt from a frozen historical rate table. Unknown models and missing usage are excluded.",
     },
   ];
 
@@ -45,10 +45,10 @@ export default function DocsPage() {
         <span className="label">Quick Links</span>
         <div className="grid grid-cols-2 gap-3">
           {[
-            { label: "Quickstart Guide",   href: "/docs/quickstart" },
-            { label: "API Reference",      href: "/docs/api" },
-            { label: "Scoring Rubric",     href: "/docs/scoring" },
-            { label: "GitHub Action",      href: "/docs/github-action" },
+            { label: "Quickstart Guide",   href: "https://github.com/desenyon/lucenteval/blob/main/docs/QUICKSTART.md" },
+            { label: "API Reference",      href: `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/redoc` },
+            { label: "Scoring Rubric",     href: "https://github.com/desenyon/lucenteval/blob/main/docs/SCORING_RUBRIC.md" },
+            { label: "GitHub Action",      href: "https://github.com/desenyon/lucenteval/tree/main/.github/actions/run-eval" },
           ].map((link) => (
             <a
               key={link.href}
@@ -147,8 +147,9 @@ export default function DocsPage() {
             color: "#00E5FF",
             fontFamily: "monospace",
           }}
-        >{`- uses: lucent-eval/run-action@v1
+        >{`- uses: ./.github/actions/run-eval
   with:
+    api_url: \${{ vars.LUCENT_API_URL }}
     api_key: \${{ secrets.LUCENT_API_KEY }}
     endpoint_url: \${{ secrets.AGENT_ENDPOINT }}
     min_composite_score: "0.75"
@@ -160,9 +161,9 @@ export default function DocsPage() {
         <span className="label">Key Constraints</span>
         <ul style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
           {[
-            "All runs use developer-supplied API keys. Lucent Eval never holds provider credentials.",
-            "All scores are public. There is no private leaderboard mode in v1.",
-            "Corpus versions are immutable after release. A run always references a frozen corpus version.",
+            "Agent credentials are encrypted during execution and cleared when the run finishes.",
+            "Completed scores are public. Raw traces are restricted to the owning account.",
+            "Accepted runs store frozen prompt snapshots and scoring configuration.",
             "Hallucination scorer does not score temporal claims.",
             "Composite score weights are published in full. Any change is a versioned release event.",
           ].map((c, i) => (
